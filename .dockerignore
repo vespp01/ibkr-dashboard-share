@@ -1,0 +1,75 @@
+# Repo-root .dockerignore - applies to the backend image build context.
+# Keep the build context small; copy only what the Dockerfile actually needs.
+
+# VCS
+.git
+.gitignore
+.gitattributes
+
+# Python venvs / bytecode
+.venv
+.venv-*
+__pycache__
+*.py[cod]
+*.so
+.Python
+
+# Local editor / OS noise
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Local SQLite (the volume holds the canonical DB inside the container)
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+ibkr_backend.db*
+
+# Test / cache artefacts
+.pytest_cache
+.coverage
+htmlcov
+
+# Frontend lives in a separate context - do not ship it into the backend image.
+frontend
+node_modules
+
+# Docs / large reference files we do not need at runtime.
+# Note: tests/ are intentionally NOT excluded because they are useful for
+# in-image debugging.
+DESIGN_SYSTEM.md
+HANDOVER.md
+README.md
+*.md
+"Front-end redesign"
+"SCRIPTS FASE 2 A IMPLEMENTAD"
+ibkr_dashboard_scope.json
+design-tokens.css
+"Deep Resarch_text_markdown.md"
+
+# Local logs / temp
+*.log
+.playwright-mcp
+output
+streamlit_err.txt
+streamlit_out.txt
+
+# Private local IBKR exports are bind-mounted when needed; never bake them into images.
+Extractos/*
+!Extractos/.gitkeep
+
+# Do not bake secrets into the image - `.env` is injected at runtime via env_file.
+.env
+.env.local
+.env.*.local
+
+# Compose / Docker meta (image does not need them at runtime).
+docker-compose*.yml
+docker-compose.override.yml
+.dockerignore

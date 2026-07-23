@@ -1,0 +1,24 @@
+# Pre-commit hooks for IBKR Dashboard.
+# Install once per clone:  pre-commit install
+# Run manually on every tracked file:  pre-commit run --all-files
+#
+# detect-secrets prevents credentials and local identifiers from entering the
+# shareable history. The baseline contains reviewed placeholder-only matches.
+# To re-baseline:
+#   detect-secrets scan --baseline .secrets.baseline
+
+repos:
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ["--baseline", ".secrets.baseline"]
+        exclude: |
+          (?x)^(
+            \.venv/.*|
+            node_modules/.*|
+            frontend/node_modules/.*|
+            legacy/.*|
+            Extractos/.*|
+            \.secrets\.baseline
+          )$

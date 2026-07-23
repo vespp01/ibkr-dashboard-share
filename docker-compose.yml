@@ -1,0 +1,92 @@
+# Portable two-service stack for the IBKR Dashboard.
+#
+# Usage:
+#   cp .env.example .env       # then fill IB_FLEX_TOKEN, IB_FLEX_QUERY_ID
+#   docker compose up -d --build
+#   docker compose run --rm bootstrap        # first deploy / empty DB only
+#   open http://localhost:5173                # frontend (SPA + nginx /api proxy)
+#   curl http://localhost:8001/health         # backend (direct)
+#
+# Persistent state:
+#   - `db_data` named volume holds /app/data/ibkr_backend.db (SQLite)
+#   - `./Extractos` is bind-mounted read-only into the backend for legacy CSV/PDFs
+#
+# To wipe state and start over:  docker compose down -v
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: ibkr_backend/Dockerfile
+    image: ${BACKEND_IMAGE:-ibkr-backend:dev}
+    container_name: ${BACKEND_CONTAINER_NAME:-ibkr-backend}
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Container-friendly overrides; .env can still override these.
+      API_HOST: 0.0.0.0
+      API_PORT: "8000"
+      # APScheduler fires in the container TZ; without this, PIPELINE_CRON
+      # times are UTC, not local (see CLAUDE.md gotcha).
+      TZ: ${TZ:-Europe/Zurich}
+      DATABASE_URL: sqlite:////app/data/ibkr_backend.db
+      WATCHLIST_FILE: /app/watchlists.yaml
+      # CORS doesn't matter when the SPA goes through nginx /api proxy, but we keep
+      # it permissive so a local browser hitting :8000 directly still works.
+      CORS_ORIGINS: "http://localhost:5173,http://localhost:8080,http://127.0.0.1:5173"
+    volumes:
+      - db_data:/app/data
+      - ./Extractos:/app/Extractos:ro
+      - ./watchlists.yaml:/app/watchlists.yaml:ro
+      - ./price_alerts.yaml:/app/price_alerts.yaml:ro
+    ports:
+      - "${BACKEND_HOST_PORT:-8001}:8000"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: ${FRONTEND_IMAGE:-ibkr-frontend:dev}
+    container_name: ${FRONTEND_CONTAINER_NAME:-ibkr-frontend}
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_HOST_PORT:-5173}:80"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1/", "-o", "/dev/null"]
+      interval: 30s
+      timeout: 5s
+      start_period: 5s
+      retries: 3
+
+  bootstrap:
+    image: ${BACKEND_IMAGE:-ibkr-backend:dev}
+    build:
+      context: .
+      dockerfile: ibkr_backend/Dockerfile
+    profiles:
+      - tools
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: sqlite:////app/data/ibkr_backend.db
+      WATCHLIST_FILE: /app/watchlists.yaml
+    volumes:
+      - db_data:/app/data
+      - ./Extractos:/app/Extractos:ro
+      - ./watchlists.yaml:/app/watchlists.yaml:ro
+      - ./price_alerts.yaml:/app/price_alerts.yaml:ro
+    command: ["python", "-m", "ibkr_backend.cli", "bootstrap-if-empty", "--years", "4"]
+
+volumes:
+  db_data:
+    name: ${DB_VOLUME_NAME:-ibkr_dashboard_db_data}

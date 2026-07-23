@@ -1,0 +1,138 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FlexQueryResponse queryName="dashboard_full_daily" type="AF">
+  <FlexStatements count="1">
+    <FlexStatement accountId="U1234567" fromDate="20250101" toDate="20250131" period="LastMonth" whenGenerated="20250201;060000">
+      <AccountInformation accountId="U1234567" acctAlias="main" currency="EUR" accountType="Individual" />
+      <SecuritiesInfo>
+        <SecurityInfo conid="265598" symbol="AAPL" assetCategory="STK" subCategory="COMMON" isin="US0378331005" listingExchange="NASDAQ" issuer="Apple Inc" issuerCountryCode="US" currency="USD" multiplier="1" sector="Technology" industry="Computer Hardware" description="APPLE INC" />
+        <SecurityInfo conid="76792991" symbol="TSLA" assetCategory="STK" subCategory="COMMON" isin="US88160R1014" listingExchange="NASDAQ" issuer="Tesla Inc" issuerCountryCode="US" currency="USD" multiplier="1" />
+        <SecurityInfo conid="100000" symbol="VWCE" assetCategory="ETF" isin="IE00BK5BQT80" listingExchange="GETTEX" issuer="Vanguard" issuerCountryCode="IE" currency="EUR" multiplier="1" />
+      </SecuritiesInfo>
+      <ConversionRates>
+        <ConversionRate reportDate="20250131" fromCurrency="USD" toCurrency="EUR" rate="0.92" />
+        <ConversionRate reportDate="20250131" fromCurrency="EUR" toCurrency="EUR" rate="1.0" />
+      </ConversionRates>
+      <Trades>
+        <Trade tradeID="T1001" accountId="U1234567" conid="265598" symbol="AAPL"
+               dateTime="20250105;143000" tradeDate="20250105" settleDateTarget="20250107"
+               buySell="BUY" quantity="10" tradePrice="180.00" proceeds="-1800.00"
+               taxes="0" ibCommission="-1.00" ibCommissionCurrency="USD"
+               netCash="-1801.00" fifoPnlRealized="0" mtmPnl="0"
+               openCloseIndicator="O" currency="USD" fxRateToBase="0.92"
+               transactionType="ExchTrade" exchange="NASDAQ" assetCategory="STK"
+               multiplier="1" levelOfDetail="EXECUTION" />
+        <Trade tradeID="T1002" accountId="U1234567" conid="265598" symbol="AAPL"
+               dateTime="20250120;150000" tradeDate="20250120" settleDateTarget="20250122"
+               buySell="SELL" quantity="-5" tradePrice="195.00" proceeds="975.00"
+               taxes="0" ibCommission="-1.00" ibCommissionCurrency="USD"
+               netCash="974.00" fifoPnlRealized="74.00" mtmPnl="74.00"
+               openCloseIndicator="C" currency="USD" fxRateToBase="0.93"
+               transactionType="ExchTrade" exchange="NASDAQ" assetCategory="STK"
+               multiplier="1" levelOfDetail="EXECUTION" />
+      </Trades>
+      <CashTransactions>
+        <CashTransaction transactionID="C2001" accountId="U1234567" conid="265598"
+                         symbol="AAPL" type="Dividends" amount="6.00" currency="USD"
+                         fxRateToBase="0.92" dateTime="20250115" settleDate="20250115"
+                         reportDate="20250115" description="AAPL(US0378331005) CASH DIVIDEND USD 0.24 PER SHARE - US TAX"
+                         assetCategory="STK" />
+        <CashTransaction transactionID="C2002" accountId="U1234567" conid="265598"
+                         symbol="AAPL" type="Withholding Tax" amount="-0.90" currency="USD"
+                         fxRateToBase="0.92" dateTime="20250115" settleDate="20250115"
+                         reportDate="20250115" description="AAPL(US0378331005) PAYMENT IN LIEU OF DIVIDEND - US TAX"
+                         assetCategory="STK" />
+        <CashTransaction transactionID="C2003" accountId="U1234567" type="Deposits/Withdrawals"
+                         amount="5000" currency="EUR" fxRateToBase="1.0"
+                         dateTime="20250110" settleDate="20250110" reportDate="20250110"
+                         description="Deposit" />
+        <CashTransaction transactionID="C2004" accountId="U1234567" type="Broker Interest Paid"
+                         amount="-12.50" currency="EUR" fxRateToBase="1.0"
+                         dateTime="20250131" settleDate="20250131" reportDate="20250131"
+                         description="Margin interest" />
+      </CashTransactions>
+      <OpenPositions>
+        <OpenPosition reportDate="20250131" accountId="U1234567" conid="265598"
+                      symbol="AAPL" position="5" markPrice="200.00" positionValue="1000.00"
+                      costBasisPrice="180.00" costBasisMoney="900.00"
+                      fifoPnlUnrealized="100.00" percentOfNAV="20.0"
+                      currency="USD" fxRateToBase="0.92" multiplier="1"
+                      assetCategory="STK" levelOfDetail="SUMMARY" openDateTime="20250105;143000" />
+        <OpenPosition reportDate="20250131" accountId="U1234567" conid="100000"
+                      symbol="VWCE" position="20" markPrice="120.00" positionValue="2400.00"
+                      costBasisPrice="100.00" costBasisMoney="2000.00"
+                      fifoPnlUnrealized="400.00" percentOfNAV="50.0"
+                      currency="EUR" fxRateToBase="1.0" multiplier="1"
+                      assetCategory="ETF" levelOfDetail="SUMMARY" openDateTime="20240601;100000" />
+      </OpenPositions>
+      <CashReport>
+        <CashReportCurrency accountId="U1234567" currency="EUR"
+                            endingCash="1500" endingSettledCash="1500"
+                            dividends="0" withholdingTax="0" brokerInterest="-12.50"
+                            commissions="0" feesReceivables="0" deposits="5000" />
+        <CashReportCurrency accountId="U1234567" currency="USD"
+                            endingCash="200" endingSettledCash="200"
+                            dividends="6" withholdingTax="-0.9" brokerInterest="0"
+                            commissions="-2" feesReceivables="0" />
+      </CashReport>
+      <EquitySummaryByReportDateInBase>
+        <EquitySummaryByReportDateInBase accountId="U1234567" reportDate="20250101" currency="EUR" total="10000" cash="5000" stock="5000" />
+        <EquitySummaryByReportDateInBase accountId="U1234567" reportDate="20250105" currency="EUR" total="10100" cash="3199" stock="6901" />
+        <EquitySummaryByReportDateInBase accountId="U1234567" reportDate="20250110" currency="EUR" total="15200" cash="8199" stock="7001" />
+        <EquitySummaryByReportDateInBase accountId="U1234567" reportDate="20250115" currency="EUR" total="15400" cash="8204" stock="7196" />
+        <EquitySummaryByReportDateInBase accountId="U1234567" reportDate="20250120" currency="EUR" total="15800" cash="9100" stock="6700" />
+        <EquitySummaryByReportDateInBase accountId="U1234567" reportDate="20250131" currency="EUR" total="16200" cash="9087" stock="7113" />
+      </EquitySummaryByReportDateInBase>
+      <ChangeInNAV>
+        <ChangeInNAV accountId="U1234567" fromDate="20250101" toDate="20250131" currency="EUR"
+                     startingValue="10000" endingValue="16200" mtm="1135.65" realized="74"
+                     changeInUnrealized="0" dividends="5.52" withholdingTax="-0.83"
+                     changeInDividendAccruals="1.15" interest="-12.50" changeInInterestAccruals="0"
+                     commissions="-1.84" brokerFees="0" otherFees="0" transactionTax="0"
+                     depositsWithdrawals="5000" fxTranslation="-1.15" twr="7.6453" />
+      </ChangeInNAV>
+      <MTDYTDPerformanceSummary>
+        <MTDYTDPerformanceSummaryUnderlying accountId="U1234567" assetCategory="STK" symbol="AAPL"
+                     conid="265598" mtmMTD="100" mtmYTD="100"
+                     realSTMTD="74" realSTYTD="74" realLTMTD="0" realLTYTD="0"
+                     realizedPnlMTD="74" realizedPnlYTD="74" />
+        <MTDYTDPerformanceSummaryUnderlying accountId="U1234567" assetCategory="ETF" symbol="VWCE"
+                     conid="100000" mtmMTD="400" mtmYTD="400"
+                     realSTMTD="0" realSTYTD="0" realLTMTD="0" realLTYTD="0"
+                     realizedPnlMTD="0" realizedPnlYTD="0" />
+      </MTDYTDPerformanceSummary>
+      <OptionEAE>
+        <OptionEAE accountId="U1234567" assetCategory="OPT" symbol="AAPL  250117P00180000"
+                   conid="700001" underlyingConid="265598" underlyingSymbol="AAPL"
+                   multiplier="100" date="20250117" transactionType="Assignment"
+                   quantity="-1" tradePrice="0" proceeds="0" commisionsAndTax="-0.25"
+                   realizedPnl="-55" currency="USD" />
+        <OptionEAE accountId="U1234567" assetCategory="OPT" symbol="AAPL  250117C00210000"
+                   conid="700002" underlyingConid="265598" underlyingSymbol="AAPL"
+                   multiplier="100" date="20250117" transactionType="Expiration"
+                   quantity="1" tradePrice="0" proceeds="0" commisionsAndTax="0"
+                   realizedPnl="-120" currency="USD" />
+      </OptionEAE>
+      <Transfers>
+        <Transfer transactionID="TR3001" accountId="U1234567" conid="76792991" symbol="TSLA"
+                  assetCategory="STK" type="ACATS" direction="IN" date="20250112"
+                  quantity="5" positionAmount="1200" cashTransfer="0"
+                  costAdjustmentAmount="950" deliveringBroker="OTHR" currency="USD" />
+        <Transfer accountId="U1234567" type="INTERNAL" direction="IN" date="20250120"
+                  cashTransfer="2500" currency="EUR" />
+      </Transfers>
+      <CorporateActions />
+      <OpenDividendAccruals>
+        <OpenDividendAccrual accountId="U1234567" conid="265598" symbol="AAPL"
+                             exDate="20250210" payDate="20250215" quantity="5"
+                             grossRate="0.25" grossAmount="1.25" tax="-0.19" netAmount="1.06"
+                             currency="USD" />
+      </OpenDividendAccruals>
+      <InterestAccruals>
+        <InterestAccrualsCurrency accountId="U1234567" currency="EUR" toDate="20250131"
+                                  interestType="MARGIN_INTEREST" interest="-12.50"
+                                  endingAccrualBalance="-12.50" />
+      </InterestAccruals>
+      <TransactionTaxes />
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>

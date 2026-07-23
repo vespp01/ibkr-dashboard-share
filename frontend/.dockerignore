@@ -1,0 +1,27 @@
+# Frontend build context lives at ./frontend/. Keep it small.
+node_modules
+dist
+.vite
+.cache
+
+# Editor / OS
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# Logs / temp
+*.log
+*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# VCS
+.git
+.gitignore
+
+# Don't bake secrets
+.env
+.env.local
+.env.*.local

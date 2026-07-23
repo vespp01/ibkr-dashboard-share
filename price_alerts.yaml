@@ -1,0 +1,21 @@
+# Alertas de precio — el dashboard vigila estos umbrales vía IB Gateway y avisa
+# por Telegram al cruzarlos. Requiere ENABLE_LIVE_OVERLAY=true + IB Gateway
+# corriendo, y TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID en .env.
+#
+# op: ">" avisa al SUPERAR el precio · "<" avisa al CAER por debajo.
+# Cada alerta se dispara una vez al cruzar y se re-arma cuando el precio vuelve.
+# Plantilla genérica basada en los símbolos de ejemplo de watchlists.yaml.
+# Sigue INERTE (alerts: []) hasta que (a) pongas un precio en cada regla,
+# (b) muevas las que quieras al bloque `alerts:`, y (c) arranques IB Gateway con
+# ENABLE_LIVE_OVERLAY=true. Los precios son PLACEHOLDERS (0) a propósito —
+# configura tus propios umbrales.
+alerts: []
+
+  # --- core ---
+  # - symbol: AAPL
+  #   op: ">"        # ">" techo (avisa al superar) · "<" suelo (avisa al caer)
+  #   price: 0       # <-- TU umbral
+  #   note: ""
+  # - symbol: MSFT
+  #   op: ">"
+  #   price: 0

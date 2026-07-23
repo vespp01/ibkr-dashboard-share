@@ -1,0 +1,19 @@
+# Watchlists are version-controlled here — IBKR has no programmatic watchlist
+# export, so this YAML is the source of truth. The TWS API enriches each entry
+# at runtime (live quote, contract details, sector).
+#
+# Schema:
+#   <list_name>:
+#     - symbol: AAPL          # required
+#       exchange: SMART       # optional, default SMART
+#       currency: USD         # optional, default USD
+#       conid: 265598         # optional but recommended (avoids ambiguous lookup)
+#       notes: ""             # free-form
+
+core:
+  - symbol: AAPL
+    exchange: SMART
+    currency: USD
+  - symbol: MSFT
+    exchange: SMART
+    currency: USD

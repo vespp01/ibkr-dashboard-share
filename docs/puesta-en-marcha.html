@@ -1,0 +1,656 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IBKR Dashboard - Guía de puesta en marcha</title>
+<style>
+  :root{
+    --violet:#6d28d9;
+    --violet-dark:#5b21b6;
+    --violet-soft:#ede9fe;
+    --ink:#1e1b2e;
+    --muted:#6b7280;
+    --border:#e5e7eb;
+    --bg:#f8f7fb;
+    --card:#ffffff;
+    --code-bg:#1e1b2e;
+    --code-fg:#e6e3f0;
+    --warn-bg:#fff7ed;
+    --warn-border:#fb923c;
+    --ok-bg:#ecfdf5;
+    --ok-border:#34d399;
+  }
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{
+    margin:0;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    color:var(--ink);
+    background:var(--bg);
+    line-height:1.6;
+    font-size:16px;
+  }
+  header.masthead{
+    background:linear-gradient(135deg,var(--violet) 0%,var(--violet-dark) 100%);
+    color:#fff;
+    padding:48px 24px 40px;
+    box-shadow:0 4px 20px rgba(109,40,217,.25);
+  }
+  header.masthead .wrap{max-width:980px;margin:0 auto;}
+  header.masthead h1{margin:0 0 6px;font-size:2rem;letter-spacing:-.01em;}
+  header.masthead .sub{opacity:.9;font-size:1.05rem;margin:0;}
+  header.masthead .date{opacity:.75;font-size:.9rem;margin-top:14px;display:inline-block;
+    background:rgba(255,255,255,.15);padding:4px 12px;border-radius:999px;}
+  .container{max-width:980px;margin:0 auto;padding:0 24px 80px;}
+  nav.toc{
+    background:var(--card);
+    border:1px solid var(--border);
+    border-radius:14px;
+    padding:22px 26px;
+    margin:32px 0;
+    box-shadow:0 1px 3px rgba(0,0,0,.04);
+  }
+  nav.toc h2{margin:0 0 12px;font-size:1.1rem;color:var(--violet-dark);}
+  nav.toc ol{margin:0;padding-left:22px;columns:2;column-gap:36px;}
+  nav.toc li{margin:4px 0;break-inside:avoid;}
+  nav.toc a{color:var(--ink);text-decoration:none;}
+  nav.toc a:hover{color:var(--violet);text-decoration:underline;}
+  section{
+    background:var(--card);
+    border:1px solid var(--border);
+    border-radius:14px;
+    padding:28px 30px;
+    margin:24px 0;
+    box-shadow:0 1px 3px rgba(0,0,0,.04);
+  }
+  section h2{
+    margin:0 0 4px;
+    font-size:1.45rem;
+    color:var(--violet-dark);
+    letter-spacing:-.01em;
+    scroll-margin-top:16px;
+  }
+  section h2 .num{
+    display:inline-block;
+    background:var(--violet-soft);
+    color:var(--violet-dark);
+    font-size:.85rem;
+    font-weight:700;
+    border-radius:8px;
+    padding:2px 9px;
+    margin-right:10px;
+    vertical-align:middle;
+  }
+  h3{margin:26px 0 8px;font-size:1.12rem;color:var(--ink);}
+  h4{margin:18px 0 6px;font-size:1rem;color:var(--violet-dark);}
+  p{margin:10px 0;}
+  a{color:var(--violet);}
+  code{
+    font-family:"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+    background:var(--violet-soft);
+    color:var(--violet-dark);
+    padding:1px 6px;
+    border-radius:5px;
+    font-size:.88em;
+  }
+  pre{
+    background:var(--code-bg);
+    color:var(--code-fg);
+    padding:16px 18px;
+    border-radius:10px;
+    overflow-x:auto;
+    font-size:.86rem;
+    line-height:1.55;
+    margin:14px 0;
+  }
+  pre code{background:none;color:inherit;padding:0;font-size:inherit;}
+  pre .c{color:#8b8699;}            /* comment */
+  table{
+    width:100%;
+    border-collapse:collapse;
+    margin:16px 0;
+    font-size:.92rem;
+  }
+  th,td{
+    text-align:left;
+    padding:9px 12px;
+    border-bottom:1px solid var(--border);
+    vertical-align:top;
+  }
+  th{
+    background:var(--violet-soft);
+    color:var(--violet-dark);
+    font-weight:700;
+    border-bottom:2px solid var(--violet);
+  }
+  tr:hover td{background:#faf9fd;}
+  td code{white-space:nowrap;}
+  .callout{
+    border:1px solid var(--violet-soft);
+    background:#faf8ff;
+    padding:12px 16px;
+    border-radius:8px;
+    margin:16px 0;
+  }
+  .callout.warn{border-color:var(--warn-border);background:var(--warn-bg);}
+  .callout.ok{border-color:var(--ok-border);background:var(--ok-bg);}
+  .callout p{margin:6px 0;}
+  .callout .tag{font-weight:700;text-transform:uppercase;font-size:.72rem;letter-spacing:.04em;}
+  .callout.warn .tag{color:#c2410c;}
+  .callout.ok .tag{color:#047857;}
+  .callout .tag.violet{color:var(--violet-dark);}
+  ul,ol{margin:10px 0;padding-left:24px;}
+  li{margin:5px 0;}
+  .pill{display:inline-block;background:var(--violet-soft);color:var(--violet-dark);
+    border-radius:999px;padding:2px 11px;font-size:.8rem;font-weight:600;margin:2px 4px 2px 0;}
+  .badge-new{background:#dcfce7;color:#15803d;border-radius:6px;padding:1px 8px;
+    font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.03em;margin-left:8px;
+    vertical-align:middle;}
+  .method-get{color:#047857;font-weight:700;}
+  .method-post{color:#b45309;font-weight:700;}
+  footer{
+    text-align:center;
+    color:var(--muted);
+    font-size:.85rem;
+    padding:24px;
+    max-width:980px;
+    margin:0 auto;
+  }
+  .toplink{display:block;text-align:right;font-size:.8rem;margin-top:8px;}
+  @media (max-width:680px){
+    nav.toc ol{columns:1;}
+    header.masthead h1{font-size:1.6rem;}
+    section{padding:22px 18px;}
+  }
+</style>
+</head>
+<body>
+
+<header class="masthead">
+  <div class="wrap">
+    <h1>IBKR Dashboard - Guía de puesta en marcha</h1>
+    <p class="sub">Despliegue, ingesta de datos y referencia completa de funciones</p>
+    <span class="date">Actualizado: 2026-06-12</span>
+  </div>
+</header>
+
+<div class="container">
+
+<nav class="toc">
+  <h2>Índice</h2>
+  <ol>
+    <li><a href="#que-es">Qué es</a></li>
+    <li><a href="#requisitos">Requisitos previos</a></li>
+    <li><a href="#config">Configuración inicial (.env)</a></li>
+    <li><a href="#flex">Setup de Flex Queries en IBKR</a></li>
+    <li><a href="#arrancar">Arrancar el stack</a></li>
+    <li><a href="#ingesta">Primera ingesta de datos</a></li>
+    <li><a href="#scheduler">El scheduler (automático)</a></li>
+    <li><a href="#telegram">Notificaciones por Telegram</a></li>
+    <li><a href="#dedup">Mantenimiento: dedup CSV+Flex</a></li>
+    <li><a href="#backups">Backups</a></li>
+    <li><a href="#tests">Tests</a></li>
+    <li><a href="#troubleshooting">Troubleshooting / gotchas</a></li>
+    <li><a href="#cli">Referencia: comandos CLI</a></li>
+    <li><a href="#api">Referencia: endpoints API</a></li>
+  </ol>
+</nav>
+<section id="que-es">
+  <h2><span class="num">1</span>Qué es</h2>
+  <p><strong>IBKR Dashboard</strong> es un dashboard personal de cartera para <strong>una sola cuenta de Interactive Brokers</strong>. Un único usuario, <strong>sin autenticación</strong>, que corre <strong>en local</strong> tras un stack de <code>docker-compose</code> (OrbStack en Mac).</p>
+  <ul>
+    <li><strong>Backend</strong>: FastAPI + SQLAlchemy + APScheduler. Ingiere XML del <strong>Flex Web Service</strong> de IBKR, parsea las secciones a una base SQLite (portable a Postgres) y expone 50 endpoints JSON.</li>
+    <li><strong>Frontend</strong>: React + Vite + recharts (nginx estático con proxy <code>/api</code>).</li>
+  </ul>
+  <p>El dashboard se organiza en <strong>8 pestañas</strong>, cada una consumiendo la API directamente:</p>
+  <p>
+    <span class="pill">Resumen</span>
+    <span class="pill">Cartera</span>
+    <span class="pill">Operaciones</span>
+    <span class="pill">Opciones</span>
+    <span class="pill">Dividendos</span>
+    <span class="pill">Rentabilidad</span>
+    <span class="pill">Comisiones</span>
+    <span class="pill">Margen</span>
+  </p>
+  <div class="callout">
+    <p><span class="tag violet">Filosofía de datos</span></p>
+    <p>El Flex Web Service es la vía de ingesta canónica. Los exports XML/CSV en <code>Extractos/</code> son el <strong>Plan B</strong> cuando el token se rompe. <strong>No hay métricas inventadas</strong>: toda cifra traza a un campo de IBKR (<code>fifoPnlRealized</code>, <code>netCash</code>, <code>fxRateToBase</code>) o a un cálculo transparente sobre ellos. No-objetivos: multi-cuenta, multi-broker, móvil, tiempo real.</p>
+  </div>
+  <a class="toplink" href="#">↑ volver al índice</a>
+</section>
+<section id="requisitos">
+  <h2><span class="num">2</span>Requisitos previos</h2>
+  <table>
+    <tr><th>Requisito</th><th>Detalle</th></tr>
+    <tr><td><strong>Docker</strong></td><td>Docker + Docker Compose. En esta máquina vía <strong>OrbStack</strong> (Mac). Verifica con <code>docker compose ps</code>.</td></tr>
+    <tr><td><strong>Cuenta IBKR</strong></td><td>Con acceso al <strong>Flex Web Service</strong> habilitado en el Client Portal (Performance &amp; Reports → Flex Queries).</td></tr>
+    <tr><td><strong>Puertos</strong></td><td>Frontend <code>5173</code> · Backend/API <code>8001</code> en el host. El <code>:8000</code> está ocupado por otro contenedor, por eso el host port del backend es explícito (<code>BACKEND_HOST_PORT</code> en <code>.env</code>).</td></tr>
+    <tr><td><strong>(Opcional) Token Telegram</strong></td><td>Para las notificaciones diarias - bot creado con @BotFather + tu <code>chat_id</code>. Ver §8.</td></tr>
+    <tr><td><strong>(Opcional) Python local</strong></td><td>Solo para los git hooks: <code>python3 -m venv .venv && .venv/bin/pip install pre-commit detect-secrets</code> y <code>.venv/bin/pre-commit install</code>.</td></tr>
+  </table>
+  <a class="toplink" href="#">↑ volver al índice</a>
+</section>
+<section id="config">
+  <h2><span class="num">3</span>Configuración inicial (<code>.env</code>)</h2>
+  <p>Crea un <code>.env</code> en la raíz del repo. Estas son <strong>todas</strong> las variables que lee <code>ibkr_backend/config.py</code>, con su propósito y valor por defecto. Usa <strong>placeholders</strong> - nunca subas secretos reales (el hook <code>detect-secrets</code> lo bloquea).</p>
+
+  <h3>Flex Web Service</h3>
+  <table>
+    <tr><th>Variable</th><th>Default</th><th>Propósito</th></tr>
+    <tr><td><code>IB_FLEX_TOKEN</code></td><td><em>(vacío)</em></td><td>Token del Flex Web Service (caduca cada 90 días).</td></tr>
+    <tr><td><code>IB_FLEX_QUERY_ID</code></td><td><em>(vacío)</em></td><td>ID de la <strong>Activity</strong> Flex Query (snapshot diario: trades, cash, posiciones, NAV…).</td></tr>
+    <tr><td><code>IB_FLEX_QUERY_ID_TC</code></td><td><em>(vacío)</em></td><td>ID de la <strong>Trade Confirmation</strong> Flex Query (fills por ejecución + comisiones).</td></tr>
+    <tr><td><code>FLEX_USER_AGENT</code></td><td><code>ibkr-dashboard/0.1</code></td><td>User-Agent de las peticiones al Flex.</td></tr>
+    <tr><td><code>FLEX_MAX_WAIT_SECONDS</code></td><td><code>300</code></td><td>Espera máxima a que IBKR genere el statement.</td></tr>
+    <tr><td><code>FLEX_POLL_INTERVAL_SECONDS</code></td><td><code>5</code></td><td>Intervalo de polling mientras se genera.</td></tr>
+  </table>
+
+  <h3>Base de datos</h3>
+  <table>
+    <tr><th>Variable</th><th>Default</th><th>Propósito</th></tr>
+    <tr><td><code>DATABASE_URL</code></td><td><code>sqlite:///./ibkr_backend.db</code></td><td>URL de la BD. SQLite por defecto (portable a Postgres). En el contenedor vive en <code>/app/data/ibkr_backend.db</code> (volumen <code>ibkr_dashboard_db_data</code>).</td></tr>
+  </table>
+
+  <h3>Pipeline / scheduler</h3>
+  <table>
+    <tr><th>Variable</th><th>Default</th><th>Propósito</th></tr>
+    <tr><td><code>PIPELINE_CRON</code></td><td><code>30 6 * * *</code></td><td>Cron del pull diario de Activity Flex. 06:30 en la TZ del contenedor (Europe/Zurich).</td></tr>
+    <tr><td><code>TC_CRON</code></td><td><code>15 * * * 1-5</code></td><td>Cron del pull de Trade Confirmations: cada hora al :15, días laborables.</td></tr>
+    <tr><td><code>BASE_CURRENCY</code></td><td><code>CHF</code></td><td>Divisa base de todos los importes redenominados.</td></tr>
+    <tr><td><code>PIPELINE_STALE_AFTER_HOURS</code></td><td><code>30</code></td><td>Umbral del watchdog de staleness: alerta si el último pull con éxito tiene &gt; 30h.</td></tr>
+    <tr><td><code>STALENESS_WATCHDOG_CRON</code></td><td><code>0 */6 * * *</code></td><td>Cron del watchdog (cada 6h escribe WARNING en log si está stale).</td></tr>
+  </table>
+
+  <h3>API / CORS</h3>
+  <table>
+    <tr><th>Variable</th><th>Default</th><th>Propósito</th></tr>
+    <tr><td><code>API_HOST</code></td><td><code>127.0.0.1</code></td><td>Host de uvicorn dentro del contenedor.</td></tr>
+    <tr><td><code>API_PORT</code></td><td><code>8000</code></td><td>Puerto interno del backend (se publica como <code>8001</code> en el host).</td></tr>
+    <tr><td><code>BACKEND_HOST_PORT</code></td><td><code>8001</code></td><td>Puerto del backend en el host. Es explícito porque el <code>:8000</code> está ocupado por otro contenedor.</td></tr>
+    <tr><td><code>CORS_ORIGINS</code></td><td><code>http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173</code></td><td>Lista CSV de orígenes permitidos. Añade orígenes de VPN privada sólo si expones el dashboard fuera de localhost.</td></tr>
+    <tr><td><code>TZ</code></td><td><code>Europe/Zurich</code></td><td>Zona horaria del contenedor - define a qué hora real dispara APScheduler (ver §7).</td></tr>
+  </table>
+
+  <h3>Telegram <span class="badge-new">nuevo</span></h3>
+  <table>
+    <tr><th>Variable</th><th>Default</th><th>Propósito</th></tr>
+    <tr><td><code>TELEGRAM_BOT_TOKEN</code></td><td><em>(vacío)</em></td><td>Token del bot de Telegram. El digest diario se activa <strong>solo si</strong> esta y la siguiente están puestas.</td></tr>
+    <tr><td><code>TELEGRAM_CHAT_ID</code></td><td><em>(vacío)</em></td><td>Chat al que enviar el digest. Ver §8 para obtenerlo.</td></tr>
+  </table>
+
+  <h3>IB Gateway / Watchlists (opcionales, off por defecto)</h3>
+  <table>
+    <tr><th>Variable</th><th>Default</th><th>Propósito</th></tr>
+    <tr><td><code>ENABLE_LIVE_OVERLAY</code></td><td><code>false</code></td><td>Overlay de margen en vivo vía IB Gateway (scaffolding, opcional).</td></tr>
+    <tr><td><code>IBGW_HOST</code> / <code>IBGW_PORT</code></td><td><code>127.0.0.1</code> / <code>4002</code></td><td>Host/puerto del IB Gateway (paper = 4002).</td></tr>
+    <tr><td><code>IBGW_CLIENT_ID</code> / <code>IBGW_READONLY</code></td><td><code>11</code> / <code>true</code></td><td>Client id y modo read-only del Gateway.</td></tr>
+    <tr><td><code>WATCHLIST_FILE</code></td><td><code>watchlists.yaml</code></td><td>Fichero YAML de watchlists espejado a la BD.</td></tr>
+    <tr><td><code>CPG_BASE_URL</code></td><td><code>https://localhost:5000/v1/api</code></td><td>Client Portal Gateway, para importar watchlists del lado IBKR.</td></tr>
+    <tr><td><code>CPG_VERIFY_TLS</code></td><td><code>false</code></td><td><code>false</code> | <code>true</code> | ruta a un bundle PEM.</td></tr>
+  </table>
+
+  <h4>Ejemplo mínimo de <code>.env</code></h4>
+  <pre><code>IB_FLEX_TOKEN=&lt;tu-token-flex&gt;
+IB_FLEX_QUERY_ID=&lt;id-8-digitos-activity&gt;
+IB_FLEX_QUERY_ID_TC=&lt;id-8-digitos-tc&gt;
+BACKEND_HOST_PORT=8001
+TZ=Europe/Zurich
+BASE_CURRENCY=CHF
+<span class="c"># Telegram (opcional - deja en blanco para desactivar el digest)</span>
+TELEGRAM_BOT_TOKEN=&lt;token-de-BotFather&gt;
+TELEGRAM_CHAT_ID=&lt;tu-chat-id&gt;</code></pre>
+  <a class="toplink" href="#">↑ volver al índice</a>
+</section>
+<section id="flex">
+  <h2><span class="num">4</span>Setup de Flex Queries en IBKR</h2>
+  <p>El backend necesita <strong>dos</strong> Flex Queries guardadas en tu Client Portal, y sus IDs en el <code>.env</code>. Detalle completo en <code>docs/setup/flex-queries.md</code>.</p>
+
+  <h3>4.0 Generar el token del Flex Web Service</h3>
+  <ol>
+    <li>Client Portal → <strong>Performance &amp; Reports</strong> → <strong>Flex Queries</strong>.</li>
+    <li>Baja al final: <strong>Flex Web Service</strong> → <strong>Generate Token</strong>.</li>
+    <li>Guarda el número de 20-30 dígitos en <code>IB_FLEX_TOKEN</code>. <strong>Válido 90 días</strong>; renuévalo antes de que caduque o el pipeline devuelve HTTP 604.</li>
+  </ol>
+
+  <h3>4.1 Activity Flex Query (<code>dashboard_full_daily</code>)</h3>
+  <p>Es el snapshot diario que alimenta casi todas las pestañas. Crear: Flex Queries → <strong>Activity Flex Query</strong> → <strong>Create</strong>.</p>
+  <h4>Cabecera</h4>
+  <table>
+    <tr><th>Campo</th><th>Valor</th></tr>
+    <tr><td>Query Name</td><td><code>dashboard_full_daily</code></td></tr>
+    <tr><td>Period</td><td><code>Year to Date</code> (recomendado; idempotente, recupera huecos solo)</td></tr>
+    <tr><td>Date Format / Time Format</td><td><code>yyyyMMdd</code> / <code>HHmmss</code></td></tr>
+    <tr><td>Date/Time Separator</td><td><code>;</code></td></tr>
+    <tr><td>Include Canceled Trades?</td><td><strong>No</strong></td></tr>
+    <tr><td>Include Currency Rates?</td><td><strong>Yes</strong></td></tr>
+    <tr><td>Format</td><td><strong>XML</strong></td></tr>
+  </table>
+  <h4>Secciones a marcar</h4>
+  <p>Marca <strong>todas</strong> estas (y dentro de cada una, <strong>todas las columnas</strong> - el parser tolera columnas extra pero falla en silencio si faltan):</p>
+  <ul>
+    <li>Account Information</li>
+    <li>Net Asset Value (NAV) in Base · Change in NAV in Base</li>
+    <li><strong>MTD/YTD Performance Summary</strong> (si <code>mtd_ytd_performance</code> sale vacío, es este checkbox)</li>
+    <li>Cash Report · Open Positions (Summary) · Trades (Execution) · Cash Transactions</li>
+    <li>Open Dividend Accruals · Interest Accruals · Transaction Taxes</li>
+    <li>Conversion Rates · Securities Info · Corporate Actions</li>
+    <li>FIFO Performance Summary in Base · MTM Performance Summary in Base</li>
+    <li>Option Exercises, Assignments, Expirations · Transfers (defensivos)</li>
+  </ul>
+  <p>Al guardar verás un <strong>Query ID de 8 dígitos</strong> → ponlo en <code>IB_FLEX_QUERY_ID</code>.</p>
+
+  <h3>4.2 Trade Confirmation Flex Query (<code>dashboard_tc_daily</code>)</h3>
+  <p>Fills por ejecución con timestamps de colocación de orden (<code>orderTime</code>) y desglose completo de comisión. Crear: Flex Queries → <strong>Trade Confirmation Flex Query</strong> (¡no Activity!) → <strong>Create</strong>.</p>
+  <table>
+    <tr><th>Campo</th><th>Valor</th></tr>
+    <tr><td>Query Name</td><td><code>dashboard_tc_daily</code></td></tr>
+    <tr><td>Period</td><td><code>Today</code> (única opción para TC; el CLI hace backfill con <code>--from</code>/<code>--to</code>)</td></tr>
+    <tr><td>Output Format</td><td><strong>XML</strong></td></tr>
+    <tr><td>Date / Time Format</td><td><code>yyyy-MM-dd</code> / <code>HH:mm:ss</code>, separador <code>;</code></td></tr>
+    <tr><td>Display Currency</td><td><code>Base Currency Summary</code></td></tr>
+  </table>
+  <p>Una sola sección: <strong>Trade Confirms</strong> → activa <strong>todas las columnas</strong>. Guarda y pon el ID en <code>IB_FLEX_QUERY_ID_TC</code>. Luego recrea el backend para que tome la variable:</p>
+  <pre><code>docker compose up -d --force-recreate backend
+docker exec ibkr-backend env | grep IB_FLEX_QUERY_ID_TC</code></pre>
+
+  <div class="callout warn">
+    <p><span class="tag">Renovación del token</span></p>
+    <p>Cada 90 días el token caduca y el pull diario empieza a devolver HTTP 604. Regenéralo en Flex Web Service → Generate Token, sustituye <code>IB_FLEX_TOKEN</code> en <code>.env</code> y haz <code>docker compose up -d --force-recreate backend</code>. Las queries guardadas <strong>no</strong> caducan, solo el token.</p>
+  </div>
+  <a class="toplink" href="#">↑ volver al índice</a>
+</section>
+<section id="arrancar">
+  <h2><span class="num">5</span>Arrancar el stack</h2>
+  <p>Invoca <code>docker compose</code> siempre <strong>desde la raíz del repo</strong> (los bind mounts usan rutas relativas: <code>./Extractos</code>, <code>./watchlists.yaml</code>).</p>
+
+  <h4>Comprobar salud</h4>
+  <pre><code>docker compose ps</code></pre>
+
+  <h4>Modo dev (hot-reload)</h4>
+  <p>Bind-montea <code>./ibkr_backend</code> + <code>./tests</code> y corre uvicorn <code>--reload</code>. Editas un <code>.py</code> → la API lo recoge en &lt;2 s.</p>
+  <pre><code>docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+<span class="c"># tip: alias dcdev='docker compose -f docker-compose.yml -f docker-compose.dev.yml'</span></code></pre>
+
+  <h4>Modo producción (rebuild)</h4>
+  <p>Reconstruye solo cuando cambien <code>requirements</code> o el <code>Dockerfile</code>.</p>
+  <pre><code>docker compose up -d --build</code></pre>
+
+  <h4>Logs</h4>
+  <pre><code>docker compose logs -f backend</code></pre>
+
+  <h3>URLs</h3>
+  <table>
+    <tr><th>Servicio</th><th>Local</th><th>VPN privada</th></tr>
+    <tr><td>Dashboard</td><td><code>http://localhost:5173</code></td><td>Añade tu propio host privado si lo usas.</td></tr>
+    <tr><td>API / Swagger</td><td><code>http://localhost:8001/docs</code></td><td>Añade tu propio host privado si lo usas.</td></tr>
+  </table>
+  <p>La BD vive en el volumen Docker <code>ibkr_dashboard_db_data</code>, desacoplado de la ruta del host (sobrevive si mueves el directorio). <code>docker-compose.override.yml</code> (gitignored) se reserva para remapeos de puerto por máquina.</p>
+  <a class="toplink" href="#">↑ volver al índice</a>
+</section>
+<section id="ingesta">
+  <h2><span class="num">6</span>Primera ingesta de datos</h2>
+  <p>El esquema se crea solo (los comandos llaman a <code>init-db</code> internamente). Para el primer pull:</p>
+  <pre><code>docker exec ibkr-backend python -m ibkr_backend.cli pull --period LastBusinessDay</code></pre>
+  <p>El CLI imprime un recuento de filas por sección. Espera valores no-cero en <code>nav_daily</code>, <code>change_in_nav</code>, <code>trades</code>, <code>cash_transactions</code>, <code>mtd_ytd_performance</code>, <code>fifo_performance</code>, <code>mtm_performance</code>.</p>
+
+  <h4>Bootstrap histórico</h4>
+  <pre><code><span class="c"># Backfill de N años en ventanas de 365 días</span>
+docker exec ibkr-backend python -m ibkr_backend.cli bootstrap --years 4
+
+<span class="c"># Solo si la BD está vacía (idempotente - útil en primer arranque)</span>
+docker exec ibkr-backend python -m ibkr_backend.cli bootstrap-if-empty --years 4</code></pre>
+
+  <h4>Trade Confirmations</h4>
+  <pre><code><span class="c"># Hoy (lo que hace el cron)</span>
+docker exec ibkr-backend python -m ibkr_backend.cli pull-tc
+
+<span class="c"># Backfill de los últimos 30 días (techo TC: 45 días)</span>
+docker exec ibkr-backend python -m ibkr_backend.cli pull-tc \
+    --from $(date -v-30d +%Y%m%d) --to $(date +%Y%m%d)</code></pre>
+
+  <div class="callout warn">
+    <p><span class="tag">Plan B - cuando el token falla</span></p>
+    <p>Si el Flex token está roto, carga cualquier export guardado en <code>Extractos/</code> (montado en <code>/app/Extractos</code>):</p>
+    <pre><code>docker exec ibkr-backend python -m ibkr_backend.cli load-xml /app/Extractos/&lt;file&gt;.xml
+<span class="c"># o un Activity Statement CSV:</span>
+docker exec ibkr-backend python -m ibkr_backend.cli load-csv /app/Extractos/&lt;file&gt;.csv</code></pre>
+  </div>
+
+  <h4>Verificar los runs</h4>
+  <pre><code>docker exec ibkr-backend python -m ibkr_backend.cli runs
+<span class="c"># o vía API:</span>
+curl http://localhost:8001/pipeline/runs</code></pre>
+  <p>La lista completa de comandos CLI está en la <a href="#cli">§ Referencia: comandos CLI</a>.</p>
+  <a class="toplink" href="#">↑ volver al índice</a>
+</section>
+<section id="scheduler">
+  <h2><span class="num">7</span>El scheduler (automático)</h2>
+  <p>El backend monta un <strong>APScheduler</strong> con tres jobs. <strong>APScheduler dispara en la TZ del contenedor</strong> - compose fija <code>TZ=Europe/Zurich</code>, así que los crons son hora de Zúrich. Sin esa variable (imagen standalone) cae a UTC.</p>
+  <table>
+    <tr><th>Job</th><th>Cron (default)</th><th>Qué hace</th></tr>
+    <tr><td>Pull diario</td><td><code>30 6 * * *</code> → 06:30 Zúrich</td><td>Ejecuta el pipeline completo de Activity Flex (<code>run_full_pipeline</code>) y, tras el pull, dispara el digest de Telegram si está configurado.</td></tr>
+    <tr><td>Pull Trade Confirms</td><td><code>15 * * * 1-5</code> → cada hora al :15, L-V</td><td>Re-tira las Trade Confirmations (<code>run_tc_pipeline</code>). Idempotente, las re-ejecuciones son gratis.</td></tr>
+    <tr><td>Watchdog de staleness</td><td><code>0 */6 * * *</code> → cada 6h</td><td>Si el último pull con éxito tiene &gt; 30h (<code>PIPELINE_STALE_AFTER_HOURS</code>), escribe un <strong>WARNING</strong> en el log. Sin push.</td></tr>
+  </table>
+  <div class="callout">
+    <p><span class="tag violet">Monitorización del estado</span></p>
+    <p>El estado de staleness se expone en <code>GET /pipeline/status</code> bajo <code>staleness.is_stale</code> - un monitor externo puede leerlo y actuar.</p>
+  </div>
+  <a class="toplink" href="#">↑ volver al índice</a>
+</section>
+<section id="telegram">
+  <h2><span class="num">8</span>Notificaciones por Telegram <span class="badge-new">nuevo</span></h2>
+  <p>Tras cada pull diario con éxito, el backend envía un <strong>digest del día anterior</strong> a tu chat de Telegram. Se activa <strong>solo si</strong> <code>.env</code> tiene <code>TELEGRAM_BOT_TOKEN</code> <em>y</em> <code>TELEGRAM_CHAT_ID</code> (off por defecto).</p>
+
+  <h3>Qué reporta</h3>
+  <ul>
+    <li><strong>Dividendos cobrados</strong> - bruto / retención / neto, nº de acciones y dividendo por acción.</li>
+    <li><strong>Operaciones</strong> - trades de acciones y opciones, incluyendo ejercicio/asignación de opciones y depósitos/retiradas.</li>
+    <li><strong>Comisiones</strong> - acumulado del mes en curso.</li>
+  </ul>
+
+  <h3>Obtener el <code>chat_id</code></h3>
+  <ol>
+    <li>Crea el bot con <strong>@BotFather</strong> y copia el token.</li>
+    <li>Escríbele un mensaje al bot desde tu cuenta.</li>
+    <li>Abre en el navegador <code>https://api.telegram.org/bot&lt;token&gt;/getUpdates</code> y copia el <code>chat.id</code> que aparece.</li>
+    <li>Pon ambos valores en <code>.env</code> y recrea el backend.</li>
+  </ol>
+
+  <h3>Comandos de prueba</h3>
+  <pre><code><span class="c"># Mensaje de prueba de una línea (verifica token + chat_id)</span>
+docker exec ibkr-backend python -m ibkr_backend.cli notify-test
+
+<span class="c"># Previsualizar el digest de un día SIN enviar ni mover el watermark</span>
+docker exec ibkr-backend python -m ibkr_backend.cli notify-now --test --date 2026-06-11
+
+<span class="c"># Enviar el digest de un día concreto (fuerza el envío)</span>
+docker exec ibkr-backend python -m ibkr_backend.cli notify-now --date 2026-06-11
+
+<span class="c"># Sin --date: reporta "ayer" y avanza el watermark</span>
+docker exec ibkr-backend python -m ibkr_backend.cli notify-now</code></pre>
+
+  <div class="callout ok">
+    <p><span class="tag">Anti-duplicados</span></p>
+    <p>Hay un <strong>watermark</strong> (<code>NotificationState</code>) que impide reenviar el mismo día. <code>notify-now --date</code> fuerza el envío sin tocar el watermark; el job automático sí lo avanza.</p>
+  </div>
+  <div class="callout warn">
+    <p><span class="tag">Migración desde una hoja legacy</span></p>
+    <p>Si vienes de una automatización previa, <strong>para su envío automático</strong> para no duplicar las notificaciones.</p>
+  </div>
+  <a class="toplink" href="#">↑ volver al índice</a>
+</section>
+<section id="dedup">
+  <h2><span class="num">9</span>Mantenimiento de datos: dedup CSV+Flex <span class="badge-new">nuevo</span></h2>
+  <p><strong>El problema:</strong> importar por CSV (<code>Extractos/</code>, Plan B) y por Flex crea filas <strong>duplicadas con PK distinta</strong> - la misma operación entra dos veces, una con clave <code>csv_*</code> y otra con la clave de Flex.</p>
+  <p>El comando borra solo las filas <code>csv_*</code> que tienen gemelo de Flex (misma clave económica); conserva los <strong>huérfanos</strong> CSV y los fills genuinos repetidos.</p>
+  <pre><code><span class="c"># Dry-run: solo informa, no borra nada</span>
+docker exec ibkr-backend python -m ibkr_backend.cli dedup-csv-imports
+
+<span class="c"># Aplicar: borra los duplicados (¡haz backup antes!)</span>
+docker exec ibkr-backend python -m ibkr_backend.cli dedup-csv-imports --apply</code></pre>
+  <div class="callout warn">
+    <p><span class="tag">Antes de <code>--apply</code></span></p>
+    <p>Haz un backup de la BD (ver §10). El dry-run muestra, por tabla: total, <em>removable csv</em>, <em>orphan csv kept</em> y <em>genuine groups</em> - revísalo antes de borrar.</p>
+  </div>
+  <a class="toplink" href="#">↑ volver al índice</a>
+</section>
+<section id="backups">
+  <h2><span class="num">10</span>Backups</h2>
+  <p>La BD vive en el volumen Docker <code>ibkr_dashboard_db_data</code>; dentro del contenedor está en <code>/app/data/ibkr_backend.db</code>. Los backups manuales viven en <code>~/.ibkr-backups/</code>.</p>
+  <pre><code>docker cp ibkr-backend:/app/data/ibkr_backend.db \
+    ~/.ibkr-backups/ibkr_backend.$(date +%Y%m%d).db</code></pre>
+  <p>Hazlo siempre <strong>antes</strong> de operaciones destructivas (<code>dedup-csv-imports --apply</code>, <code>reconcile-cashflows</code>). El volumen sobrevive a mover el directorio del repo, pero un backup en disco es la red de seguridad real.</p>
+  <a class="toplink" href="#">↑ volver al índice</a>
+</section>
+<section id="tests">
+  <h2><span class="num">11</span>Tests</h2>
+  <table>
+    <tr><th>Capa</th><th>Comando</th><th>Nota</th></tr>
+    <tr><td>Backend</td><td><code>pytest -q</code></td><td>Hit a SQLite real vía <code>tmp_path</code> - <strong>nunca se mockea la BD</strong>. No añadir <code>--basetemp</code> (rompe CI, ver §12).</td></tr>
+    <tr><td>Frontend</td><td><code>npm run build</code> (en <code>frontend/</code>)</td><td>Build de Vite.</td></tr>
+    <tr><td>E2E (Playwright)</td><td><code>cd frontend &amp;&amp; npm run e2e</code></td><td>Smoke R4 de las 8 tabs contra el <strong>stack vivo</strong> (necesita datos), NO en CI. Primera vez: <code>npm run e2e:install</code>. Override del target con <code>E2E_BASE_URL</code>.</td></tr>
+    <tr><td>Pre-commit</td><td><code>.venv/bin/pre-commit install</code></td><td><code>detect-secrets</code> contra el diff staged; falsos positivos en <code>.secrets.baseline</code>.</td></tr>
+  </table>
+  <a class="toplink" href="#">↑ volver al índice</a>
+</section>
+<section id="troubleshooting">
+  <h2><span class="num">12</span>Troubleshooting / gotchas</h2>
+  <table>
+    <tr><th>Síntoma</th><th>Causa / regla</th></tr>
+    <tr><td><strong>Flex HTTP 604</strong></td><td>Token caducado (ciclo de 90 días), query ID desactivada, o formato de salida ≠ XML. Diagnostica en el IBKR Portal; mientras tanto usa <code>load-xml</code> sobre cualquier export de <code>Extractos/</code>.</td></tr>
+    <tr><td><strong><code>mtd_ytd_performance</code> vacío</strong></td><td>Falta el checkbox <strong>MTDYTDPerformanceSummary</strong> en la Activity Flex Query (ver §4.1).</td></tr>
+    <tr><td><strong><code>netCash</code></strong></td><td>Ya descuenta <code>ibCommission</code> - trata la comisión solo como desglose, <strong>nunca la re-restes</strong>.</td></tr>
+    <tr><td><strong>Multiplicador de derivados</strong></td><td>Ya está aplicado en <code>OpenPositions.positionValue</code> y <code>Trades.proceeds</code> - no multipliques a mano.</td></tr>
+    <tr><td><strong>CI rojo de repente</strong></td><td>Alguien re-añadió <code>--basetemp</code> a pytest. El runner de GitHub no puede crear el <code>.tmp/</code> padre; usa el temp por defecto del OS.</td></tr>
+    <tr><td><strong>Withholding tax <code>UNKNOWN</code></strong></td><td>El país se parsea del sufijo <code>' - XX TAX'</code> de la descripción, con fallback a <code>Instrument.issuer_country</code>. <code>UNKNOWN</code> es normal en algunas descripciones no-US.</td></tr>
+    <tr><td><strong>Idempotencia</strong></td><td>Las claves son IDs suministrados por IBKR. Nunca cambies una fórmula de id sintético sin re-bootstrapear (duplicados garantizados).</td></tr>
+  </table>
+  <a class="toplink" href="#">↑ volver al índice</a>
+</section>
+<section id="cli">
+  <h2><span class="num">13</span>Referencia: comandos CLI</h2>
+  <p>Prefijo: <code>docker exec ibkr-backend python -m ibkr_backend.cli &lt;comando&gt;</code></p>
+  <table>
+    <tr><th>Comando</th><th>Descripción</th></tr>
+    <tr><td><code>init-db</code></td><td>Crea el esquema de la BD (idempotente).</td></tr>
+    <tr><td><code>pull</code> <code>[--period --from --to]</code></td><td>Ejecuta el pipeline de Activity Flex una vez.</td></tr>
+    <tr><td><code>pull-tc</code> <code>[--from --to]</code></td><td>Tira la Trade Confirmation Flex Query (fills por ejecución).</td></tr>
+    <tr><td><code>bootstrap</code> <code>--years N</code></td><td>Backfill de N años de histórico en ventanas de 365 días.</td></tr>
+    <tr><td><code>bootstrap-if-empty</code> <code>--years N</code></td><td>Igual, pero solo si la BD está vacía.</td></tr>
+    <tr><td><code>load-xml</code> <code>&lt;path&gt;</code></td><td>Carga un XML de Flex guardado (Plan B / offline).</td></tr>
+    <tr><td><code>load-csv</code> <code>&lt;path&gt;</code></td><td>Carga un Activity Statement CSV de IBKR.</td></tr>
+    <tr><td><code>watchlist-sync</code></td><td>Espeja el YAML de watchlist a la BD.</td></tr>
+    <tr><td><code>watchlist-import</code> <code>[--merge-yaml/--db-only]</code></td><td>Importa watchlists de IBKR vía Client Portal Gateway.</td></tr>
+    <tr><td><code>runs</code> <code>[--limit N]</code></td><td>Lista los últimos runs del pipeline.</td></tr>
+    <tr><td><code>normalize-asset-class</code> <code>[--dry-run]</code></td><td>One-shot: colapsa labels legacy de asset_class a códigos canónicos.</td></tr>
+    <tr><td><code>reconcile-cashflows</code></td><td>Re-deriva <code>external_cashflow</code> de todas las filas <code>nav_daily</code>.</td></tr>
+    <tr><td><code>dedup-csv-imports</code> <code>[--apply]</code></td><td>Borra filas duplicadas por imports CSV+Flex solapados (ver §9).</td></tr>
+    <tr><td><code>notify-test</code></td><td>Mensaje de prueba al chat de Telegram (ver §8).</td></tr>
+    <tr><td><code>notify-now</code> <code>[--date --test]</code></td><td>Envía o previsualiza el digest dividendos/operaciones/comisiones.</td></tr>
+    <tr><td><code>serve</code> <code>[--host --port --reload]</code></td><td>Arranca el servidor FastAPI (uvicorn).</td></tr>
+  </table>
+  <a class="toplink" href="#">↑ volver al índice</a>
+</section>
+<section id="api">
+  <h2><span class="num">14</span>Referencia: endpoints API</h2>
+  <p>Base local: <code>http://localhost:8001</code>. Inventario vivo e interactivo en <code>/docs</code> (Swagger). 47 GET de solo-lectura + 3 POST de utilidad. Todos los <code>GET</code> tienen método <span class="method-get">GET</span>; los marcados como <span class="method-post">POST</span> mutan estado.</p>
+
+  <h3>Portfolio (<code>/portfolio</code>)</h3>
+  <table>
+    <tr><th>Endpoint</th><th>Descripción</th></tr>
+    <tr><td><code>/overview</code></td><td>Grid de KPIs del dashboard.</td></tr>
+    <tr><td><code>/positions</code></td><td>Snapshot de posiciones abiertas.</td></tr>
+    <tr><td><code>/unrealized</code></td><td>Suma de <code>fifoPnlUnrealized</code> en el snapshot.</td></tr>
+    <tr><td><code>/realized-timeseries</code></td><td>P&amp;L realizado por mes/año.</td></tr>
+    <tr><td><code>/pnl-by-asset-class</code></td><td>P&amp;L realizado + no realizado por clase de activo.</td></tr>
+    <tr><td><code>/cash</code></td><td>Saldos de caja por divisa.</td></tr>
+    <tr><td><code>/open-shorts</code></td><td>Posiciones cortas abiertas.</td></tr>
+    <tr><td><code>/attribution</code></td><td>Atribución de performance (waterfall ChangeInNAV + TWR encadenado).</td></tr>
+    <tr><td><code>/attribution-timeseries</code></td><td>Buckets de atribución diarios/mensuales/anuales.</td></tr>
+    <tr><td><code>/margin</code></td><td>Postura de margen - apalancamiento, deuda en caja, concentración, Reg-T.</td></tr>
+    <tr><td><code>/margin/interest</code></td><td>Interés pagado sobre deuda de margen + APR efectivo estimado.</td></tr>
+    <tr><td><code>/margin/leverage-series</code></td><td>Apalancamiento diario (gross/NLV) desde NavDaily.</td></tr>
+    <tr><td><code>/symbol-attribution</code></td><td>Atribución de P&amp;L por símbolo (FIFO + MTM Underlying).</td></tr>
+    <tr><td><code>/all-time-return</code></td><td>Retorno absoluto honesto sobre dinero invertido (NAV vs depósitos acumulados).</td></tr>
+  </table>
+
+  <h3>Performance (<code>/performance</code>)</h3>
+  <table>
+    <tr><th>Endpoint</th><th>Descripción</th></tr>
+    <tr><td><code>/twr</code></td><td>Time-Weighted Return.</td></tr>
+    <tr><td><code>/xirr</code></td><td>Tasa interna de retorno (money-weighted).</td></tr>
+    <tr><td><code>/benchmark</code></td><td>Benchmark externo (S&amp;P 500) redenominado en divisa base.</td></tr>
+    <tr><td><code>/vs-benchmark</code></td><td>Comparación honesta unificada: TWR de la cartera vs S&amp;P (mismas fechas, rebase a 100).</td></tr>
+    <tr><td><code>/risk</code></td><td>Sharpe · Sortino · Max DD · Volatilidad · Calmar (TWR diario de ChangeInNAV).</td></tr>
+    <tr><td><code>/alpha</code></td><td>Alpha (simple + Jensen) + Beta vs S&amp;P 500 del periodo.</td></tr>
+  </table>
+
+  <h3>Options (<code>/options</code>)</h3>
+  <table>
+    <tr><th>Endpoint</th><th>Descripción</th></tr>
+    <tr><td><code>/summary</code></td><td>Bloque de KPIs de la cabecera de Opciones.</td></tr>
+    <tr><td><code>/trades</code></td><td>Trades OPT enriquecidos con campos OCC + resumen win/loss.</td></tr>
+    <tr><td><code>/eae</code></td><td>Eventos de ejercicio/asignación/expiración (OptionEAE).</td></tr>
+    <tr><td><code>/premium-timeseries</code></td><td>Prima neta (netCash con signo) por mes o año.</td></tr>
+    <tr><td><code>/by-underlying</code></td><td>P&amp;L de OPT agrupado por ticker subyacente.</td></tr>
+    <tr><td><code>/open-positions</code></td><td>Posiciones OPT abiertas del último snapshot, incluyendo largos y cortos.</td></tr>
+    <tr><td><code>/assignment-risk</code></td><td>Opciones cortas abiertas vs último cierre del subyacente (ITM/OTM + intrínseco).</td></tr>
+    <tr><td><code>/concentration</code></td><td>Concentración HHI del libro abierto de opciones por subyacente.</td></tr>
+    <tr><td><code>/dte-buckets</code></td><td>Posiciones OPT cortas abiertas por DTE (doctrina 21-DTE de tastytrade).</td></tr>
+    <tr><td><code>/pnl-attribution</code></td><td>Descomposición de P&amp;L: prima corta vs stock de la rueda vs dividendos vs interés.</td></tr>
+    <tr><td><code>/assignment-rate</code></td><td>Desglose de disposición OPT por subyacente (cerrado · expirado · ejercido · asignado).</td></tr>
+  </table>
+
+  <h3>Dividends (<code>/dividends</code>) · Commissions (<code>/commissions</code>) · Interest (<code>/interest</code>)</h3>
+  <table>
+    <tr><th>Endpoint</th><th>Descripción</th></tr>
+    <tr><td><code>/dividends/summary</code></td><td>KPIs de dividendos.</td></tr>
+    <tr><td><code>/dividends/timeseries</code></td><td>Dividendos en el tiempo.</td></tr>
+    <tr><td><code>/dividends/by-country</code></td><td>Dividendos por país.</td></tr>
+    <tr><td><code>/dividends/withholding-by-country</code></td><td>Retención por país.</td></tr>
+    <tr><td><code>/commissions/summary</code></td><td>KPIs de comisiones.</td></tr>
+    <tr><td><code>/commissions/timeseries</code></td><td>Comisiones en el tiempo.</td></tr>
+    <tr><td><code>/commissions/transaction-fees</code></td><td>Tasas de transacción.</td></tr>
+    <tr><td><code>/commissions/breakdown</code></td><td>Desglose de comisiones por sub-fee.</td></tr>
+    <tr><td><code>/interest/summary</code></td><td>KPIs de interés.</td></tr>
+  </table>
+
+  <h3>Trades (<code>/trades</code>)</h3>
+  <table>
+    <tr><th>Endpoint</th><th>Descripción</th></tr>
+    <tr><td><code>/trades</code></td><td>Lista de trades con filtros opcionales + stats resumen.</td></tr>
+    <tr><td><code>/trades/executions</code></td><td>Fills de Trade Confirmation con lag + desglose de comisión.</td></tr>
+  </table>
+
+  <h3>Pipeline (<code>/pipeline</code>) · Watchlist (<code>/watchlist</code>) - incluye los 3 POST de utilidad</h3>
+  <table>
+    <tr><th>Método · Endpoint</th><th>Descripción</th></tr>
+    <tr><td><span class="method-post">POST</span> <code>/pipeline/run</code></td><td>Dispara un pull del Flex Web Service (síncrono; <code>?async=true</code> para encolar).</td></tr>
+    <tr><td><span class="method-get">GET</span> <code>/pipeline/runs</code></td><td>Lista los runs recientes del pipeline.</td></tr>
+    <tr><td><span class="method-get">GET</span> <code>/pipeline/status</code></td><td>Estado no-secreto del pipeline (incluye <code>staleness.is_stale</code>).</td></tr>
+    <tr><td><span class="method-get">GET</span> <code>/watchlist</code></td><td>Lee las watchlists.</td></tr>
+    <tr><td><span class="method-post">POST</span> <code>/watchlist/sync</code></td><td>Espeja el YAML de watchlist a la BD.</td></tr>
+    <tr><td><span class="method-post">POST</span> <code>/watchlist/import-from-ibkr</code></td><td>Importa watchlists vía Client Portal Gateway.</td></tr>
+  </table>
+
+  <h3>Meta</h3>
+  <table>
+    <tr><th>Endpoint</th><th>Descripción</th></tr>
+    <tr><td><code>/health</code></td><td>Healthcheck simple del backend.</td></tr>
+    <tr><td><code>/data/coverage</code></td><td>Cobertura de datos disponible para pintar estados vacíos y diagnósticos.</td></tr>
+  </table>
+  <a class="toplink" href="#">↑ volver al índice</a>
+</section>
+
+</div>
+
+<footer>
+  IBKR Dashboard - Guía de puesta en marcha · actualizada 2026-06-30 · documento autocontenido (sin dependencias externas).<br>
+  Fuentes en el repo: <code>CLAUDE.md</code> · <code>docs/setup/flex-queries.md</code> · <code>ibkr_backend/config.py</code> · <code>ibkr_backend/cli.py</code> · <code>ibkr_backend/api/routes/</code>
+</footer>
+
+</body>
+</html>

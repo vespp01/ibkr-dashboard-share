@@ -1,0 +1,28 @@
+# Dev compose layer — invoke with:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# Bind-mounts ./ibkr_backend + ./tests so source edits flow into the
+# container without rebuild; turns on uvicorn --reload so the API picks
+# up Python edits in <2 s. Eliminates the `docker cp + --build` loop.
+#
+# `docker-compose.override.yml` (auto-loaded, gitignored) is reserved
+# for per-machine overrides like host port remaps — see .gitignore.
+# Don't merge this file's contents into override; keep both layers
+# separate so port remaps don't leak the bind-mounts to other devs.
+#
+# Production (single-machine local deploy per project CLAUDE.md) does
+# NOT use this file — uvicorn --reload is unsuitable for prod.
+
+services:
+  backend:
+    volumes:
+      - ./ibkr_backend:/app/ibkr_backend:ro
+      - ./tests:/app/tests:ro
+    command:
+      - sh
+      - -c
+      - >-
+        python -m ibkr_backend.cli init-db &&
+        exec uvicorn ibkr_backend.api.main:app
+        --host 0.0.0.0 --port 8000
+        --reload --reload-dir /app/ibkr_backend

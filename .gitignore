@@ -1,0 +1,97 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+.venv-*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Invalid Windows filename
+nul
+
+# Backend secrets & local DB
+.env
+.env.local
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+ibkr_backend.db*
+
+# Backend artefacts
+data/
+flex_cache/
+flex_runs/
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local runtime artefacts
+.playwright-mcp/
+.playwright-cli/
+.tmp/
+output/playwright/
+
+# Private IBKR exports/statements. Keep the directory, never track statements.
+Extractos/*
+!Extractos/.gitkeep
+
+# Personal data quarantine — patterns that caught the 2026-05-14 leak
+# (committed Google-Sheets dump of personal dividends with the live Flex
+# token in the HTML). Files named *personal* / *mias* / spreadsheets dropped
+# under docs/ never belong in the repo.
+**/*[Pp]ersonal*
+**/*[Mm]ias*
+**/real-account*
+docs/**/*.xlsx
+docs/**/*.xls
+
+# Flex token / account-id quarantine. If a real Flex token (24 digits) ever
+# lands in a file by accident, pre-commit hooks should catch it; this just
+# adds belt-and-braces for offline editing.
+**/flex-token*.txt
+**/*-credentials*
+
+# Frontend (React + Vite)
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/*.local
+.npm/
+
+# Playwright e2e artifacts
+frontend/test-results/
+frontend/playwright-report/
+frontend/blob-report/
+frontend/playwright/.cache/
+
+# Local Docker Compose overrides (per-machine port remaps etc.)
+docker-compose.override.yml
+docker-compose.override.yaml
+
+# Claude Code personal allowlist (per-machine; never tracked)
+.claude/settings.local.json
+
+# Carpeta de fuentes/insumos locales (NUNCA commitear — contiene exports con secretos)
+.nogit/
