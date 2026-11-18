@@ -87,7 +87,7 @@ def _ddmmyyyy(d: date) -> str:
 
 
 def _amounts(native: float, fx: float | None, base_ccy: str, ccy: str) -> str:
-    """`-1201.05 USD (-940.53 CHF)` — base in parens unless same currency."""
+    """`-1234.56 USD (-987.65 CHF)` — base in parens unless same currency."""
     if not ccy or ccy == base_ccy:
         return f"{_fmt(native)} {base_ccy}"
     base = native * float(fx or 1)
