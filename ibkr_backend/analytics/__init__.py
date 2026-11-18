@@ -11,6 +11,7 @@ from .dividends_calc import (
     dividends_summary,
     dividends_timeseries,
     income_projection,
+    upcoming_dividends,
     withholding_tax_by_country,
 )
 from .executions import executions_list
@@ -51,6 +52,7 @@ __all__ = [
     "dividends_timeseries",
     "executions_list",
     "interest_summary",
+    "upcoming_dividends",
     "income_projection",
     "alpha_vs_benchmark",
     "leverage_series",

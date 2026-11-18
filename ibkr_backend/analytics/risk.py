@@ -1,38 +1,56 @@
 """Risk-adjusted return metrics — Sharpe, Sortino, Max DD, Volatility, Calmar, Alpha.
 
-Source of daily returns: `ChangeInNavDaily.twr` (the per-day TWR percentage
-that IBKR computes via Modified Dietz with isolated cashflows). This is the
-clean, dense series — 64 rows for Q1 2026, growing daily as the YTD pull
-runs.
+Source of daily returns: `ChangeInNavDaily.twr` (IBKR's per-day TWR, dense:
+one row per trading day since the account opened). The same series is the
+canonical TWR (`twr.py`), so level and risk figures always agree.
 
-For periods where `ChangeInNavDaily` is sparse (pre-2026), the function
-returns metrics with a `is_reliable=false` flag.
+Conventions:
 
-All percentages are returned as numeric percentages (e.g. 9.5 means 9.5 %),
-matching the convention used elsewhere in this module.
+* Calendar-time annualisation. Observations per year = n / (calendar days /
+  365), not a fixed 252 (CIN has 261-262 rows per year). Annualised return,
+  Calmar and any ratio built on them are null for windows < 365 days (GIPS).
+  Short windows still get Sharpe/Sortino, computed from the arithmetic mean
+  daily excess return (`sharpe_method = "arithmetic"`), never extrapolated.
+* Risk-free: a documented per-year CHF table, default 0 % for every year
+  (no external fetch). Override per year with the env var
+  `RISK_FREE_CHF_PCT_BY_YEAR="2023:1.7,2024:1.2"` or per call with the
+  `risk_free_rate_pct` query parameter. The payload says which one was used.
+* Alpha / beta / tracking error / information ratio use ONE currency: the
+  portfolio's CHF daily returns are converted into the benchmark currency
+  with the same `fx_rates` the benchmark uses (`twr.convert_returns`).
+* Portfolio returns are compounded between benchmark dates, so US holidays do
+  not drop a portfolio day (B48) and Swiss holidays do not drop a benchmark
+  move.
+
+All percentages are numeric percentages (9.5 means 9.5 %).
 """
 
 from __future__ import annotations
 
 import math
+import os
 import statistics
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..db.models import CashTransaction, ChangeInNavDaily, NavDaily
+from ..db.models import ChangeInNavDaily, NavDaily
 from .filters import PeriodFilter
-
-# Same definition as metrics.DEPOSIT_TYPES — duplicated here to avoid circular import.
-_DEPOSIT_TYPES = ("Deposits/Withdrawals", "Internal Transfers")
-
-# 252 = US/Swiss trading days per year (rough average).
-_TRADING_DAYS = 252
+from .twr import cin_daily_returns, portfolio_returns
 
 # Minimum daily-return sample size for the metrics to be meaningful.
 _MIN_DAYS = 10
+# GIPS: no annualisation below one year.
+_ANNUALISE_MIN_DAYS = 365
+# Tolerance (calendar days) between the requested start and the first daily
+# return before the window is flagged as truncated (weekend / holiday starts).
+_START_TOLERANCE_DAYS = 5
+# Calendar look-back for the benchmark anchor (as-of close before the start).
+_BENCH_LOOKBACK_DAYS = 7
+
+RISK_FREE_ENV = "RISK_FREE_CHF_PCT_BY_YEAR"
 
 
 def _f(v) -> float:
@@ -41,35 +59,52 @@ def _f(v) -> float:
     return float(v)
 
 
+def risk_free_table() -> dict[int, float]:
+    """Annual CHF risk-free rate in % per calendar year. Empty = 0 % always.
+
+    Set `RISK_FREE_CHF_PCT_BY_YEAR="2023:1.7,2024:1.2"` to use a SARON-like
+    series; years not listed use 0.
+    """
+    out: dict[int, float] = {}
+    for part in os.environ.get(RISK_FREE_ENV, "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        year, _, rate = part.partition(":")
+        try:
+            out[int(year)] = float(rate)
+        except ValueError:
+            continue
+    return out
+
+
+def window_risk_free_pct(start: date, end: date) -> float:
+    """Calendar-day-weighted average annual risk-free rate over [start, end]."""
+    table = risk_free_table()
+    if not table or end <= start:
+        return 0.0
+    total_days = (end - start).days
+    acc = 0.0
+    d = start
+    while d < end:
+        year_end = min(date(d.year + 1, 1, 1), end)
+        acc += table.get(d.year, 0.0) * (year_end - d).days
+        d = year_end
+    return acc / total_days
+
+
 def _daily_returns(
     session: Session,
     period: PeriodFilter | None,
     account_id: str | None,
 ) -> list[tuple[date, float]]:
     """Daily returns as decimals (0.01 = 1 %) from ChangeInNavDaily.twr."""
-    q = select(
-        ChangeInNavDaily.snapshot_date,
-        ChangeInNavDaily.twr,
-    ).order_by(ChangeInNavDaily.snapshot_date.asc())
-    if account_id:
-        q = q.where(ChangeInNavDaily.account_id == account_id)
-    if period and period.start:
-        q = q.where(ChangeInNavDaily.snapshot_date >= period.start)
-    if period and period.end:
-        q = q.where(ChangeInNavDaily.snapshot_date <= period.end)
-    out: list[tuple[date, float]] = []
-    for d, twr in session.execute(q):
-        if d is None or twr is None:
-            continue
-        # IBKR's twr is already a percentage — convert to decimal.
-        out.append((d, _f(twr) / 100.0))
-    return out
+    return cin_daily_returns(session, period, account_id)[0]
 
 
 def _changeinnav_span(session: Session, account_id: str | None) -> tuple[date | None, date | None]:
     """Earliest / latest snapshot_date in ChangeInNavDaily (the source for these metrics)."""
-    from sqlalchemy import func as _func
-    q = select(_func.min(ChangeInNavDaily.snapshot_date), _func.max(ChangeInNavDaily.snapshot_date))
+    q = select(func.min(ChangeInNavDaily.snapshot_date), func.max(ChangeInNavDaily.snapshot_date))
     if account_id:
         q = q.where(ChangeInNavDaily.account_id == account_id)
     row = session.execute(q).first()
@@ -77,21 +112,13 @@ def _changeinnav_span(session: Session, account_id: str | None) -> tuple[date | 
 
 
 def _portfolio_inception(session: Session, account_id: str | None) -> date | None:
-    """Earliest dated event in the account — first NAV snapshot or first
-    deposit. Used as the 'true start' when the user selects period=all
-    (PeriodFilter then carries start=None, which would otherwise mask the
-    truncation against ChangeInNAV's much shorter span).
-    """
-    from sqlalchemy import func as _func
-    q1 = select(_func.min(NavDaily.snapshot_date))
-    q2 = select(_func.min(CashTransaction.settle_date)).where(
-        CashTransaction.type.in_(_DEPOSIT_TYPES)
-    )
+    """First dated NAV snapshot WITH a NAV value — the true start when the user
+    selects period=all (PeriodFilter then carries start=None). NAV-less rows and
+    deposit settle dates do not count: they predate the first valued day."""
+    q = select(func.min(NavDaily.snapshot_date)).where(NavDaily.nav_total.is_not(None))
     if account_id:
-        q1 = q1.where(NavDaily.account_id == account_id)
-        q2 = q2.where(CashTransaction.account_id == account_id)
-    candidates = [d for d in (session.execute(q1).scalar(), session.execute(q2).scalar()) if d]
-    return min(candidates) if candidates else None
+        q = q.where(NavDaily.account_id == account_id)
+    return session.execute(q).scalar()
 
 
 def _truncation_info(
@@ -106,10 +133,10 @@ def _truncation_info(
     """Detect whether the user-requested period is wider than what daily-TWR
     data actually covers, and return a payload the frontend can render clearly.
 
-    When `period.start` is None (user selected "all"), we treat the request as
-    "from inception" — earliest of (first NAV snapshot, first deposit). Same
-    for `period.end` → today. This catches the silent-truncation bug where
-    selecting "all" was reporting only the 97 days that ChangeInNAV covers.
+    When `period.start` is None (user selected "all"), the request means "from
+    inception" — the first valued NAV day. A start within
+    `_START_TOLERANCE_DAYS` calendar days before the first daily return is not
+    truncation (weekend / holiday / first-deposit lag).
     """
     from datetime import date as _date
     if period and period.start:
@@ -124,7 +151,7 @@ def _truncation_info(
 
     is_truncated = False
     truncation_reason = None
-    if req_from and series_first and req_from < series_first:
+    if req_from and series_first and (series_first - req_from).days > _START_TOLERANCE_DAYS:
         is_truncated = True
         truncation_reason = (
             f"ChangeInNAV daily series starts {series_first.isoformat()}; "
@@ -149,21 +176,15 @@ def risk_metrics(
     *,
     period: PeriodFilter | None = None,
     account_id: str | None = None,
-    risk_free_rate_pct: float = 0.0,
+    risk_free_rate_pct: float | None = None,
 ) -> dict[str, Any]:
     """Sharpe, Sortino, Volatility, Max Drawdown, Calmar — all from daily TWRs.
 
-    Source: `ChangeInNavDaily.twr` (IBKR's pre-computed daily TWR). Only
-    available only from the first Flex-covered daily TWR date, so for periods
-    that extend earlier the response carries `is_truncated=True` plus the actual
-    window used. The frontend should surface this prominently — users
-    selecting "all-time" expect coverage from 2023, not just Q1 2026.
-
-    `risk_free_rate_pct` is the annual risk-free rate as a percentage. For
-    CHF, SARON 1-month was ~0.95 % in early 2026. Default 0 % so Sharpe
-    reduces to return-over-volatility.
+    Source: `ChangeInNavDaily.twr`, base currency (CHF; the payload says so).
+    `risk_free_rate_pct=None` uses the per-year table (default 0 %);
+    an explicit value overrides it. See the module docstring for conventions.
     """
-    series = _daily_returns(session, period, account_id)
+    series, base_date = cin_daily_returns(session, period, account_id)
     n = len(series)
     coverage_first, coverage_last = _changeinnav_span(session, account_id)
     trunc = _truncation_info(
@@ -176,6 +197,13 @@ def risk_metrics(
         coverage_last,
     )
 
+    if risk_free_rate_pct is None and series:
+        rf_pct = window_risk_free_pct(base_date or series[0][0], series[-1][0])
+        rf_source = "table (CHF per-year, default 0 %)"
+    else:
+        rf_pct = risk_free_rate_pct or 0.0
+        rf_source = "param" if risk_free_rate_pct is not None else "table (CHF per-year, default 0 %)"
+
     if n < _MIN_DAYS:
         return {
             "n_days": n,
@@ -183,8 +211,10 @@ def risk_metrics(
             "reason": f"Sólo {n} días de retorno (mínimo {_MIN_DAYS} para métricas fiables)",
             "from_date": series[0][0].isoformat() if series else None,
             "to_date": series[-1][0].isoformat() if series else None,
+            "currency": "CHF",
             **trunc,
-            "risk_free_rate_pct": risk_free_rate_pct,
+            "risk_free_rate_pct": rf_pct,
+            "risk_free_source": rf_source,
             "annualised_return_pct": None,
             "annualised_volatility_pct": None,
             "annualised_downside_volatility_pct": None,
@@ -195,38 +225,41 @@ def risk_metrics(
         }
 
     rets = [r for _, r in series]
+    first_d, last_d = series[0][0], series[-1][0]
+    window_days = (last_d - (base_date or first_d)).days or 1
+    ppy = n / (window_days / 365.0)  # observations per calendar year
+    annualise = window_days >= _ANNUALISE_MIN_DAYS
+
     std_daily = statistics.stdev(rets)
+    annual_vol = std_daily * math.sqrt(ppy) * 100  # %
 
-    # Annualise volatility (vol scales with √time).
-    annual_vol = std_daily * math.sqrt(_TRADING_DAYS) * 100  # %
-
-    # Annualise return GEOMETRICALLY — compound the realised series and scale
-    # to a year. Arithmetic mean × 252 overstates the compound return by an
-    # amount proportional to variance ("variance drag"), which would then bias
-    # the Sharpe / Sortino ratios upward.
+    # Annualise return GEOMETRICALLY, only for windows of at least a year.
     cumulative = math.prod(1 + r for r in rets)
-    if cumulative > 0:
-        annual_return = (cumulative ** (_TRADING_DAYS / n) - 1) * 100
-    else:
-        annual_return = -100.0  # account wiped — degenerate case
+    annual_return: float | None = None
+    if annualise:
+        annual_return = (
+            (cumulative ** (365.0 / window_days) - 1) * 100 if cumulative > 0 else -100.0
+        )
 
     # Sortino — semi-deviation of the FULL series (positive returns count as
-    # zero), root-mean-square style. statistics.stdev(neg) was wrong: it
-    # measures spread within the negative subset, not deviation below zero.
-    # Formula: sqrt( sum(r^2 for r < 0) / (n - 1) ) — standard semi-deviation
-    # (Sortino's original definition uses target=0 = risk-free already netted).
+    # zero): sqrt( sum(r^2 for r < 0) / (n - 1) ).
     neg = [r for r in rets if r < 0]
     if neg:
         downside_var = sum(r * r for r in neg) / (n - 1)
-        annual_downside_vol = math.sqrt(downside_var) * math.sqrt(_TRADING_DAYS) * 100
+        annual_downside_vol = math.sqrt(downside_var) * math.sqrt(ppy) * 100
     else:
         annual_downside_vol = 0.0
 
-    sharpe = (annual_return - risk_free_rate_pct) / annual_vol if annual_vol > 0 else None
-    sortino = (
-        (annual_return - risk_free_rate_pct) / annual_downside_vol
-        if annual_downside_vol > 0 else None
-    )
+    if annual_return is not None:
+        excess_annual = annual_return - rf_pct
+        sharpe_method = "geometric"
+    else:
+        # Window < 1 year: arithmetic mean daily excess return x periods/year.
+        rf_period = (1 + rf_pct / 100) ** (1 / ppy) - 1
+        excess_annual = (sum(rets) / n - rf_period) * ppy * 100
+        sharpe_method = "arithmetic"
+    sharpe = excess_annual / annual_vol if annual_vol > 0 else None
+    sortino = excess_annual / annual_downside_vol if annual_downside_vol > 0 else None
 
     # Max drawdown — chain returns into a synthetic equity curve starting at 1.
     peak = 1.0
@@ -247,20 +280,28 @@ def risk_metrics(
             dd_trough_date = d
     max_dd_pct = max_dd * 100
 
-    calmar = annual_return / abs(max_dd_pct) if max_dd_pct != 0 else None
+    calmar = (
+        annual_return / abs(max_dd_pct)
+        if annual_return is not None and max_dd_pct != 0 else None
+    )
 
     return {
         "n_days": n,
         "is_reliable": True,
-        "from_date": series[0][0].isoformat(),
-        "to_date": series[-1][0].isoformat(),
+        "from_date": first_d.isoformat(),
+        "to_date": last_d.isoformat(),
+        "window_days": window_days,
+        "currency": "CHF",
         **trunc,
-        "risk_free_rate_pct": risk_free_rate_pct,
+        "risk_free_rate_pct": rf_pct,
+        "risk_free_source": rf_source,
+        "annualised": annualise,
         "annualised_return_pct": annual_return,
         "annualised_volatility_pct": annual_vol,
         "annualised_downside_volatility_pct": annual_downside_vol,
         "sharpe_ratio": sharpe,
         "sortino_ratio": sortino,
+        "sharpe_method": sharpe_method,
         "max_drawdown_pct": max_dd_pct,
         "max_drawdown_peak_date": dd_peak_date.isoformat() if dd_peak_date else None,
         "max_drawdown_trough_date": dd_trough_date.isoformat() if dd_trough_date else None,
@@ -270,51 +311,173 @@ def risk_metrics(
     }
 
 
+# --------------------------------------------------------------------------
+# Portfolio vs benchmark — paired returns on common dates
+# --------------------------------------------------------------------------
+def _pair_returns(
+    port: list[tuple[date, float]],
+    bench_close: list[tuple[date, float]],
+    base_date: date | None,
+) -> dict[str, Any]:
+    """Pair portfolio and benchmark returns on the dates both have a value.
+
+    Walks the merged timeline. Portfolio daily returns and benchmark daily
+    returns accumulate (compound) until a date present in BOTH series, where
+    one pair is emitted. Result: a US holiday (no benchmark bar) compounds the
+    portfolio's day into the next common date, a Swiss holiday (no CIN row)
+    compounds the benchmark's move — no portfolio day is dropped except those
+    after the last common date (`unpaired_days`).
+
+    The benchmark is anchored at the last close on/before `base_date`, so day 1
+    of the window is included (B07).
+    """
+    bench_close = sorted(bench_close)
+    anchor_idx = None
+    for i, (d, _) in enumerate(bench_close):
+        if base_date is not None and d <= base_date:
+            anchor_idx = i
+        else:
+            break
+    bench_ret: dict[date, float] = {}
+    start_i = anchor_idx if anchor_idx is not None else 0
+    for i in range(start_i + 1, len(bench_close)):
+        prev = bench_close[i - 1][1]
+        if prev > 0:
+            bench_ret[bench_close[i][0]] = bench_close[i][1] / prev - 1
+    port_ret = dict(port)
+
+    # Without an anchor the first benchmark bar has no return: start after it.
+    skip_until = bench_close[0][0] if (anchor_idx is None and bench_close) else None
+
+    pairs: list[tuple[date, float, float]] = []
+    rp = rb = 1.0
+    pending_port_days = 0
+    for d in sorted(set(port_ret) | set(bench_ret)):
+        if skip_until is not None and d <= skip_until:
+            continue
+        in_p, in_b = d in port_ret, d in bench_ret
+        if in_p:
+            rp *= 1 + port_ret[d]
+            pending_port_days += 1
+        if in_b:
+            rb *= 1 + bench_ret[d]
+        if in_p and in_b:
+            pairs.append((d, rp - 1, rb - 1))
+            rp = rb = 1.0
+            pending_port_days = 0
+    return {
+        "pairs": pairs,
+        "unpaired_days": pending_port_days,
+        "anchor_date": bench_close[anchor_idx][0] if anchor_idx is not None else None,
+    }
+
+
+def _benchmark_pairs(
+    session: Session,
+    *,
+    period: PeriodFilter | None,
+    account_id: str | None,
+    currency: str,
+) -> dict[str, Any]:
+    """Portfolio + benchmark returns in `currency`, paired. Never raises: an
+    `error` key explains why no comparison is possible."""
+    from ..benchmarks.sp500 import fetch_sp500_in_currency
+
+    pr = portfolio_returns(
+        session, period=period, account_id=account_id, display_currency=currency
+    )
+    if not pr["base_returns"]:
+        return {"error": "no portfolio returns in period", "port": pr}
+    if not pr["complete"]:
+        return {
+            "error": f"sin tipo de cambio CHF→{currency}: comparación no disponible",
+            "port": pr,
+        }
+    rets = pr["returns"]
+    start, end = rets[0][0], rets[-1][0]
+    base_date = pr["base_date"] or start
+    try:
+        bench_rows = fetch_sp500_in_currency(
+            currency, base_date - timedelta(days=_BENCH_LOOKBACK_DAYS), end
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"Benchmark fetch failed: {exc}", "port": pr}
+    if not bench_rows:
+        return {"error": "benchmark returned no rows", "port": pr}
+    bench_close = [(date.fromisoformat(r["date"]), float(r["close_base"])) for r in bench_rows]
+    paired = _pair_returns(rets, bench_close, base_date)
+    fx_sources = {r.get("fx_source") for r in bench_rows if r.get("fx_source")}
+    return {
+        "port": pr,
+        "start": start,
+        "end": end,
+        "base_date": base_date,
+        "bench_close": bench_close,
+        "bench_fx_source": ",".join(sorted(fx_sources)) or None,
+        **paired,
+    }
+
+
+def _risk_from_pairs(pairs: list[tuple[date, float, float]]) -> dict[str, Any]:
+    """Totals, beta, Jensen alpha, tracking error and IR from paired returns."""
+    port_rets = [p for _, p, _ in pairs]
+    bench_rets = [b for _, _, b in pairs]
+    port_total_pct = (math.prod(1 + r for r in port_rets) - 1) * 100
+    bench_total_pct = (math.prod(1 + r for r in bench_rets) - 1) * 100
+    out: dict[str, Any] = {
+        "portfolio_total_return_pct": port_total_pct,
+        "benchmark_total_return_pct": bench_total_pct,
+        "simple_alpha_pct": port_total_pct - bench_total_pct,
+        "beta": None,
+        "jensen_alpha_pct": None,
+        "tracking_error_pct": None,
+        "information_ratio": None,
+        "te_days": len(pairs),
+    }
+    if len(pairs) >= 30:
+        n = len(pairs)
+        mean_p = sum(port_rets) / n
+        mean_b = sum(bench_rets) / n
+        cov = sum((p - mean_p) * (b - mean_b) for p, b in zip(port_rets, bench_rets)) / (n - 1)
+        var_b = sum((b - mean_b) ** 2 for b in bench_rets) / (n - 1)
+        beta = cov / var_b if var_b > 0 else None
+        out["beta"] = beta
+        # Jensen's alpha (no risk-free) at period level.
+        out["jensen_alpha_pct"] = (
+            port_total_pct - beta * bench_total_pct if beta is not None else None
+        )
+        # Tracking error / IR: calendar-time annualisation.
+        diffs = [p - b for p, b in zip(port_rets, bench_rets)]
+        span_days = max((pairs[-1][0] - pairs[0][0]).days, 1)
+        ppy = n / (span_days / 365.0)
+        te_annual = statistics.stdev(diffs) * math.sqrt(ppy) * 100
+        mean_excess_annual = (sum(diffs) / n) * ppy * 100
+        out["tracking_error_pct"] = te_annual
+        out["information_ratio"] = mean_excess_annual / te_annual if te_annual > 0 else None
+    return out
+
+
 def alpha_vs_benchmark(
     session: Session,
     *,
     period: PeriodFilter | None = None,
     account_id: str | None = None,
     benchmark_currency: str = "CHF",
+    _bp: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Alpha (simple diff) + Beta vs S&P 500 over the same window.
+    """Alpha (simple + Jensen) + Beta vs the S&P 500 over the same window.
 
-    Beta is the slope of (portfolio_daily_return) vs (benchmark_daily_return);
-    alpha is the intercept-equivalent at the period level (portfolio_return -
-    beta × benchmark_return). For < 30 aligned days the regression is
-    unreliable and we report only the simple return diff.
+    Beta is the slope of portfolio vs benchmark returns paired on common dates
+    (see `_pair_returns`); both series are in `benchmark_currency` (the
+    portfolio's CHF returns are converted with the same `fx_rates`). For fewer
+    than 30 pairs only the simple return difference is reported.
     """
-    from ..benchmarks.sp500 import fetch_sp500_in_currency
-
-    series = _daily_returns(session, period, account_id)
-    if not series:
-        return {"is_reliable": False, "reason": "no portfolio returns in period"}
-
-    start = series[0][0]
-    end = series[-1][0]
-    try:
-        bench_rows = fetch_sp500_in_currency(benchmark_currency, start, end)
-    except Exception as exc:  # noqa: BLE001
-        return {"is_reliable": False, "reason": f"benchmark fetch failed: {exc}"}
-    if not bench_rows:
-        return {"is_reliable": False, "reason": "benchmark returned no rows"}
-
-    # Build daily-return map for the benchmark.
-    bench_by_date: dict[str, float] = {}
-    prev: float | None = None
-    for row in bench_rows:
-        cur = row["close_base"]
-        if prev is not None and prev > 0:
-            bench_by_date[row["date"]] = (cur / prev) - 1
-        prev = cur
-
-    # Align: only days where both series have a return.
-    pairs: list[tuple[float, float]] = []
-    for d, r in series:
-        b = bench_by_date.get(d.isoformat())
-        if b is not None:
-            pairs.append((r, b))
-
+    bp = _bp or _benchmark_pairs(
+        session, period=period, account_id=account_id, currency=benchmark_currency
+    )
+    if "error" in bp:
+        return {"is_reliable": False, "reason": bp["error"]}
+    pairs = bp["pairs"]
     if len(pairs) < 5:
         return {
             "is_reliable": False,
@@ -322,86 +485,30 @@ def alpha_vs_benchmark(
             "aligned_days": len(pairs),
         }
 
-    port_rets = [p for p, _ in pairs]
-    bench_rets = [b for _, b in pairs]
-
-    port_total_pct = (math.prod(1 + r for r in port_rets) - 1) * 100
-    bench_total_pct = (math.prod(1 + r for r in bench_rets) - 1) * 100
-    simple_alpha_pct = port_total_pct - bench_total_pct
-
-    # Beta — slope of portfolio vs benchmark.
-    if len(pairs) >= 30:
-        n = len(pairs)
-        mean_p = sum(port_rets) / n
-        mean_b = sum(bench_rets) / n
-        cov = sum((p - mean_p) * (b - mean_b) for p, b in pairs) / (n - 1)
-        var_b = sum((b - mean_b) ** 2 for b in bench_rets) / (n - 1)
-        beta = cov / var_b if var_b > 0 else None
-        # Jensen's alpha (no risk-free) at period level.
-        jensen_alpha_pct = port_total_pct - (beta * bench_total_pct) if beta is not None else None
-    else:
-        beta = None
-        jensen_alpha_pct = None
-
+    risk = _risk_from_pairs(pairs)
     coverage_first, coverage_last = _changeinnav_span(session, account_id)
-    trunc = _truncation_info(session, period, account_id, start, end, coverage_first, coverage_last)
+    trunc = _truncation_info(
+        session, period, account_id, bp["start"], bp["end"], coverage_first, coverage_last
+    )
     return {
         "is_reliable": True,
         "aligned_days": len(pairs),
-        "from_date": start.isoformat(),
-        "to_date": end.isoformat(),
+        "unpaired_days": bp["unpaired_days"],
+        "portfolio_days": len(bp["port"]["returns"]),
+        "from_date": bp["start"].isoformat(),
+        "to_date": bp["end"].isoformat(),
         **trunc,
         "benchmark": "SP500",
-        "benchmark_currency": benchmark_currency,
-        "portfolio_total_return_pct": port_total_pct,
-        "benchmark_total_return_pct": bench_total_pct,
-        "simple_alpha_pct": simple_alpha_pct,
-        "beta": beta,
-        "jensen_alpha_pct": jensen_alpha_pct,
+        "benchmark_type": "price index (^GSPC), not total return",
+        "benchmark_currency": benchmark_currency.upper(),
+        "fx_source": bp["port"]["fx_source"],
+        "benchmark_fx_source": bp["bench_fx_source"],
+        "portfolio_total_return_pct": risk["portfolio_total_return_pct"],
+        "benchmark_total_return_pct": risk["benchmark_total_return_pct"],
+        "simple_alpha_pct": risk["simple_alpha_pct"],
+        "beta": risk["beta"],
+        "jensen_alpha_pct": risk["jensen_alpha_pct"],
     }
-
-
-def _tracking_error(
-    session: Session,
-    period: PeriodFilter | None,
-    account_id: str | None,
-    benchmark_currency: str,
-) -> dict[str, Any]:
-    """Annualised tracking error + information ratio on the daily-TWR segment.
-
-    Tracking error = stdev of (portfolio_daily_return − benchmark_daily_return),
-    annualised. Information ratio = annualised mean excess return / TE. Both
-    only meaningful on the dense daily series (ChangeInNavDaily), so we require
-    ≥ 30 aligned days and otherwise return nulls.
-    """
-    from ..benchmarks.sp500 import fetch_sp500_in_currency
-
-    series = _daily_returns(session, period, account_id)
-    if len(series) < 30:
-        return {"tracking_error_pct": None, "information_ratio": None, "te_days": len(series)}
-    start, end = series[0][0], series[-1][0]
-    try:
-        bench_rows = fetch_sp500_in_currency(benchmark_currency, start, end)
-    except Exception:  # noqa: BLE001
-        return {"tracking_error_pct": None, "information_ratio": None, "te_days": 0}
-
-    bench_by_date: dict[str, float] = {}
-    prev: float | None = None
-    for row in bench_rows:
-        cur = row["close_base"]
-        if prev is not None and prev > 0:
-            bench_by_date[row["date"]] = (cur / prev) - 1
-        prev = cur
-
-    diffs = [r - bench_by_date[d.isoformat()] for d, r in series if d.isoformat() in bench_by_date]
-    if len(diffs) < 30:
-        return {"tracking_error_pct": None, "information_ratio": None, "te_days": len(diffs)}
-
-    te_daily = statistics.stdev(diffs)
-    te_annual = te_daily * math.sqrt(_TRADING_DAYS) * 100
-    mean_excess_annual = (sum(diffs) / len(diffs)) * _TRADING_DAYS * 100
-    ir = mean_excess_annual / te_annual if te_annual > 0 else None
-    return {"tracking_error_pct": te_annual, "information_ratio": ir, "te_days": len(diffs)}
 
 
 def vs_benchmark(
@@ -412,141 +519,99 @@ def vs_benchmark(
     benchmark_currency: str = "CHF",
     display_currency: str = "CHF",
 ) -> dict[str, Any]:
-    """Unified, honest portfolio-vs-S&P comparison for the Rentabilidad chart.
+    """Unified portfolio-vs-S&P comparison for the Rentabilidad chart.
 
-    Honesty model: the benchmark is sampled on the SAME dates the portfolio TWR
-    has points. Where the portfolio NAV series is sparse (pre-2026 = only
-    year-end snapshots), both lines share those few points — never a smooth
-    portfolio line drawn against a daily benchmark. Both series are rebased to
-    100 on the first common date so they overlay apples-to-apples.
-
-    Two comparison layers, each honest about its own window:
-      - level_comparison: total return of portfolio vs benchmark over the FULL
-        common window (just the endpoint ratio of the rebased indices).
-      - risk_comparison: beta / Jensen alpha / tracking error / information
-        ratio, computed only on the DAILY-resolution segment (the dense
-        ChangeInNavDaily series), with that segment reported in `resolution`.
+    ONE series, ONE set of dates: portfolio and benchmark are rebased to 100 on
+    `base_date` (last NAV day before the window; the benchmark uses its as-of
+    close there) and sampled on the dates both have a value, with returns
+    compounded between those dates. `level_comparison`, `risk_comparison` and
+    the points all derive from the same pairs, so a page shows a single
+    portfolio return and a single excess figure.
     """
-    from datetime import date as _date
-
-    from ..benchmarks.sp500 import fetch_sp500_in_currency
     from .twr import twr_series
 
-    tw = twr_series(session, period=period, account_id=account_id, display_currency=display_currency)
-    series = tw.get("series") or []
-    if len(series) < 2:
-        return {"is_reliable": False, "reason": "Serie TWR insuficiente para comparar.", "points": []}
-
-    # Honesty guard: if the underlying NAV series is too gappy, the chained
-    # Modified-Dietz TWR produces spurious returns (a 77-day gap with deposits
-    # in it can read as a −40 % "return"). Refuse to publish a misleading level
-    # comparison — mirror how twr_series itself flags this via quality.
+    ccy = (display_currency or benchmark_currency).upper()
+    tw = twr_series(
+        session, period=period, account_id=account_id, display_currency=ccy, summary=True
+    )
     quality = tw.get("quality") or {}
+    if not quality:
+        return {"is_reliable": False, "reason": "Serie TWR insuficiente para comparar.", "points": []}
     if quality.get("is_reliable") is False:
         return {
             "is_reliable": False,
             "reason": "TWR no fiable en este periodo (cobertura NAV insuficiente): "
             + (quality.get("reason") or ""),
             "resolution": {
-                "points": len(series),
                 "max_gap_days": quality.get("max_gap_days"),
                 "coverage_ratio": quality.get("coverage_ratio"),
-                "note": (
-                    "La serie NAV tiene huecos que invalidan el TWR encadenado en este "
-                    "periodo. Usa un periodo con NAV diaria densa (p.ej. 1Y/YTD) o completa "
-                    "el histórico de NAV."
-                ),
             },
             "twr_quality": quality,
             "points": [],
         }
 
-    port_pts = [(_date.fromisoformat(s["date"]), 1.0 + s["cumulative_pct"] / 100.0) for s in series]
-    start, end = port_pts[0][0], port_pts[-1][0]
-
-    try:
-        bench_rows = fetch_sp500_in_currency(benchmark_currency, start, end)
-    except Exception as exc:  # noqa: BLE001
-        return {"is_reliable": False, "reason": f"Benchmark fetch failed: {exc}", "points": []}
-    if not bench_rows:
-        return {"is_reliable": False, "reason": "Benchmark sin datos en la ventana.", "points": []}
-
-    bench_close = sorted(
-        (_date.fromisoformat(r["date"]), float(r["close_base"])) for r in bench_rows
+    bp = _benchmark_pairs(
+        session, period=period, account_id=account_id, currency=ccy
     )
-
-    def _asof(d: _date) -> float | None:
-        """Latest benchmark close on/before d (binary search)."""
-        lo, hi, res = 0, len(bench_close) - 1, None
-        while lo <= hi:
-            mid = (lo + hi) // 2
-            if bench_close[mid][0] <= d:
-                res = bench_close[mid][1]
-                lo = mid + 1
-            else:
-                hi = mid - 1
-        return res
-
-    aligned: list[tuple[_date, float, float]] = []
-    port0: float | None = None
-    bench0: float | None = None
-    for d, pidx in port_pts:
-        bc = _asof(d)
-        if bc is None:
-            continue
-        if port0 is None:
-            if bc == 0.0 or pidx == 0.0:
-                continue  # skip until a non-zero anchor — avoids /0 on rebase
-            port0, bench0 = pidx, bc
-        aligned.append((d, pidx / port0 * 100.0, bc / bench0 * 100.0))
-    if len(aligned) < 2:
+    if "error" in bp:
+        return {"is_reliable": False, "reason": bp["error"], "points": []}
+    pairs = bp["pairs"]
+    if len(pairs) < 2:
         return {"is_reliable": False, "reason": "Sin solapamiento cartera/benchmark.", "points": []}
 
-    gaps = [(aligned[i][0] - aligned[i - 1][0]).days for i in range(1, len(aligned))]
-    max_gap = max(gaps) if gaps else 0
-    # Daily segment = trailing run with all gaps <= 5 days.
-    daily_from = aligned[0][0]
-    for i in range(len(aligned) - 1, 0, -1):
-        if (aligned[i][0] - aligned[i - 1][0]).days > 5:
-            daily_from = aligned[i][0]
-            break
+    base_date: date = bp["base_date"]
+    points = [{"date": base_date.isoformat(), "portfolio": 100.0, "benchmark": 100.0}]
+    pidx = bidx = 100.0
+    for d, rp, rb in pairs:
+        pidx *= 1 + rp
+        bidx *= 1 + rb
+        points.append({"date": d.isoformat(), "portfolio": round(pidx, 4), "benchmark": round(bidx, 4)})
 
-    port_total = aligned[-1][1] / aligned[0][1] - 1
-    bench_total = aligned[-1][2] / aligned[0][2] - 1
+    risk = _risk_from_pairs(pairs)
+    port_total = risk["portfolio_total_return_pct"]
+    bench_total = risk["benchmark_total_return_pct"]
+    gaps = [(pairs[i][0] - pairs[i - 1][0]).days for i in range(1, len(pairs))]
 
-    risk = alpha_vs_benchmark(
-        session, period=period, account_id=account_id, benchmark_currency=benchmark_currency
+    risk_comparison = alpha_vs_benchmark(
+        session, period=period, account_id=account_id,
+        benchmark_currency=ccy, _bp=bp,
     )
-    te = _tracking_error(session, period, account_id, benchmark_currency)
+    risk_comparison.update({
+        "tracking_error_pct": risk["tracking_error_pct"],
+        "information_ratio": risk["information_ratio"],
+        "te_days": risk["te_days"],
+    })
 
     return {
         "is_reliable": True,
-        "from": start.isoformat(),
-        "to": end.isoformat(),
-        "display_currency": display_currency.upper(),
+        "from": bp["start"].isoformat(),
+        "to": bp["end"].isoformat(),
+        "base_date": base_date.isoformat(),
+        "display_currency": ccy,
         "benchmark": "SP500",
-        "benchmark_currency": benchmark_currency.upper(),
+        "benchmark_type": "price index (^GSPC), not total return",
+        "benchmark_currency": ccy,
+        "fx_source": bp["port"]["fx_source"],
+        "fx_degraded": bp["port"]["fx_degraded"],
+        "benchmark_fx_source": bp["bench_fx_source"],
         "resolution": {
-            "points": len(aligned),
-            "max_gap_days": max_gap,
-            "daily_segment_from": daily_from.isoformat(),
-            "is_sparse": max_gap > 7,
+            "points": len(points),
+            "max_gap_days": max(gaps) if gaps else 0,
+            "daily_segment_from": pairs[0][0].isoformat(),
+            "is_sparse": False,
+            "unpaired_days": bp["unpaired_days"],
             "note": (
-                "Cartera y S&P comparten exactamente las mismas fechas: ningún tramo "
-                "dibuja una curva suave contra otra dentada. Donde el NAV es disperso "
-                f"(pre-{daily_from.year}) ambos son rectas entre snapshots; el segmento "
-                f"diario fiable empieza el {daily_from.isoformat()}."
+                "Cartera y S&P se comparan en las mismas fechas, rebasados a 100 "
+                f"el {base_date.isoformat()}; los días sin cotización de uno de los dos "
+                "se componen en la siguiente fecha común."
             ),
         },
         "level_comparison": {
-            "portfolio_return_pct": port_total * 100,
-            "benchmark_return_pct": bench_total * 100,
-            "excess_return_pct": (port_total - bench_total) * 100,
+            "portfolio_return_pct": port_total,
+            "benchmark_return_pct": bench_total,
+            "excess_return_pct": port_total - bench_total,
         },
-        "risk_comparison": {**(risk if isinstance(risk, dict) else {}), **te},
-        "twr_quality": tw.get("quality"),
-        "points": [
-            {"date": d.isoformat(), "portfolio": round(p, 4), "benchmark": round(b, 4)}
-            for d, p, b in aligned
-        ],
+        "risk_comparison": risk_comparison,
+        "twr_quality": quality,
+        "points": points,
     }

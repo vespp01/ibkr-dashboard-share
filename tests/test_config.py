@@ -42,7 +42,7 @@ def test_explicit_cors_origins_respected(monkeypatch):
 
 
 def test_base_currency_default_is_chf(monkeypatch):
-    """The account's base currency is CHF (VISION scope IN) — the dead 'EUR'
+    """The account's base currency is CHF — the dead 'EUR'
     default contradicted .env.example and reality."""
     monkeypatch.delenv("BASE_CURRENCY", raising=False)
     cfg.get_settings.cache_clear()  # type: ignore[attr-defined]

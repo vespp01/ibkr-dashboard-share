@@ -227,10 +227,27 @@ chart library is up to the frontend — recharts, visx, ECharts, Chart.js, all O
 - **Secondary accents:** `#ec4899` (pink), `#22d3ee` (cyan) for additional series
 - **Area fills:** `rgba(168, 85, 247, 0.15)` for primary, `rgba(16, 185, 129, 0.20)` for positive, `rgba(245, 158, 11, 0.20)` for warning
 
-### Animations
+### Motion
 
-- **Defined in source:** None. Charts animate only on data change (default ~500ms ease).
-- **For UI additions:** Use `transition: 150ms ease` on color/border changes only — no slides, bounces, or parallax.
+Motion is functional: it shows where content came from and what changed. It is
+never tied to P&L sign (no confetti, no pulses on green days, no flashing tickers).
+
+- **Tokens** (`frontend/src/styles/tokens.css`, mirrored in `src/lib/motion.ts`):
+  `--dur-fast 120ms` (hover, tooltip fade, tint), `--dur-base 240ms` (drawers,
+  month slides, toggles), `--dur-enter 280ms` (card/panel entrance),
+  `--dur-slow 450ms` (bar growth); `--ease-out cubic-bezier(0.22,1,0.36,1)`,
+  `--ease-out-expo cubic-bezier(0.16,1,0.3,1)` (number count-up),
+  `--ease-standard cubic-bezier(0.2,0,0,1)` (slides); `--stagger-step 40ms`.
+- **Entrance:** fade + 6px rise, staggered 40ms per card, capped at 240ms.
+- **Numbers:** hero figures count up (600ms) on first data and on a filter
+  change, never on background polls, never in privacy mode.
+- **Charts:** bars grow 450ms, lines draw 700ms (`seriesAnimation()`); a filter
+  change keeps the previous data on screen (`keepPreviousData`) instead of
+  replaying from zero.
+- **Hover:** tint and border only. Only real buttons may move.
+- **Reduced motion:** `prefers-reduced-motion: reduce` makes every CSS
+  animation and transition instant (global block in `global.css`), and
+  `useReducedMotion()` turns off Recharts animation and count-up.
 
 ## Hover & Interaction
 
@@ -249,7 +266,7 @@ chart library is up to the frontend — recharts, visx, ECharts, Chart.js, all O
 - ❌ No `backdrop-filter: blur` or glassmorphism
 - ❌ No 135° gradients on anything except cards
 - ❌ No layered drop shadows. The only glow is `--shadow-purple`, used sparingly.
-- ❌ No bouncing animations
+- ❌ No bouncing animations, no motion tied to gain/loss
 - ❌ No "cyberpunk" / sci-fi flourishes (corner brackets, scanlines, neon glows,
   taglines). The violet accent is a calm brand signal, not a neon terminal effect.
 - ❌ Don't strip emoji — they're the brand

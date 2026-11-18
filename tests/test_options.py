@@ -509,6 +509,12 @@ def seed_attribution():
             ib_commission=Decimal("-1"), net_cash=Decimal("-51"),
             fifo_pnl_realized=Decimal("200"), fx_rate_to_base=Decimal("1"),
         ))
+        # Shares received through assignment of the short put (EAE stock leg).
+        s.add(OptionExerciseAssignment(
+            eae_id="EAE-WHL", account_id="U99", conid=7002, symbol="WHL",
+            underlying_symbol="WHL", transaction_type="Buy",
+            event_date=date(2026, 3, 5), quantity=Decimal("100"), multiplier=Decimal("1"),
+        ))
         # WHL stock sold from assigned shares: +50 capital gain
         s.add(Trade(
             trade_id="T-WHL-STK", ib_order_id="ORD-2", account_id="U99", conid=7002,
@@ -857,21 +863,23 @@ def test_options_trades_list_emits_capture_pct_for_short_close():
 
 
 def test_options_trades_list_emits_capital_at_risk_and_roc(seed_options):
-    """Each row should expose capital_at_risk_base = strike × multiplier ×
-    |qty| × fx (theoretical notional, correct denominator for CSPs/CCs and a
-    documented overstatement for long debits). roc_pct = pnl_base /
-    capital_at_risk_base × 100 for closed rows; None for opens."""
+    """Each row should expose capital_at_risk_base: strike × multiplier ×
+    |qty| × fx for short premium (CSPs/CCs) and the opening debit for long
+    options closed by a SELL. roc_pct = pnl_base / capital_at_risk_base × 100
+    for closed rows; None for opens."""
     with SessionLocal() as s:
         out = options_trades_list(s)
     by_id = {r["trade_id"]: r for r in out["rows"]}
 
-    t1 = by_id["T-1"]  # closed short call ACME, strike 33, qty -1, pnl +500
-    assert t1["capital_at_risk_base"] == pytest.approx(3300.0)
-    assert t1["roc_pct"] == pytest.approx(500.0 / 3300.0 * 100, rel=1e-4)
+    # T-1 / T-2 close with SELL (long options): capital at risk is the debit
+    # paid to open = close proceeds - realized P&L.
+    t1 = by_id["T-1"]  # proceeds 500, pnl +500 -> opening debit 0 -> undefined
+    assert t1["capital_at_risk_base"] is None
+    assert t1["roc_pct"] is None
 
-    t2 = by_id["T-2"]  # closed put ACME, strike 80, qty -1, pnl -200
-    assert t2["capital_at_risk_base"] == pytest.approx(8000.0)
-    assert t2["roc_pct"] == pytest.approx(-2.5)
+    t2 = by_id["T-2"]  # proceeds 300, pnl -200 -> opening debit 500
+    assert t2["capital_at_risk_base"] == pytest.approx(500.0)
+    assert t2["roc_pct"] == pytest.approx(-40.0)
 
     t3 = by_id["T-3"]  # open short call NOVA, strike 50, qty -1
     assert t3["capital_at_risk_base"] == pytest.approx(5000.0)
@@ -1354,3 +1362,63 @@ def test_eae_list_filters_by_underlying(seed_options):
         acme = options_eae_list(s, underlying="ACME")
     assert empty["summary"]["total"] == 0
     assert acme["summary"]["total"] == 2  # Exercise + Buy both for ACME
+
+
+# ------------------------------------------------- side split / wheel shares
+def _opt_trade(tid, conid, symbol, buy_sell, pnl, *, ttype="ExchTrade", notes=None, proceeds="100"):
+    return Trade(
+        trade_id=tid, ib_order_id=f"O-{tid}", account_id="U77", conid=conid,
+        symbol=symbol, asset_class="OPT", currency="USD", multiplier=Decimal("100"),
+        trade_date=date(2026, 3, 1), trade_datetime=datetime(2026, 3, 1, 14, 0),
+        buy_sell=buy_sell, open_close="C", quantity=Decimal("1" if buy_sell == "BUY" else "-1"),
+        trade_price=Decimal("1"), proceeds=Decimal(proceeds if buy_sell == "SELL" else "-" + proceeds),
+        ib_commission=Decimal("-1"), net_cash=Decimal("0"),
+        fifo_pnl_realized=Decimal(pnl), fx_rate_to_base=Decimal("1"),
+        transaction_type=ttype, notes=notes,
+    )
+
+
+def test_attribution_splits_premium_by_opening_side_and_limits_wheel_stock():
+    with SessionLocal() as s:
+        s.add(Account(account_id="U77", base_currency="USD"))
+        s.flush()
+        s.add_all([
+            Instrument(conid=1, symbol="AAA   260918P00040000", asset_class="OPT", multiplier=Decimal("100")),
+            Instrument(conid=2, symbol="AAA   260918C00050000", asset_class="OPT", multiplier=Decimal("100")),
+            Instrument(conid=3, symbol="AAA", asset_class="STK"),
+        ])
+        s.flush()
+        s.add(_opt_trade("short", 1, "AAA   260918P00040000", "BUY", "100"))   # BUY close = was short
+        s.add(_opt_trade("long", 2, "AAA   260918C00050000", "SELL", "900"))   # SELL close = was long
+        s.add(OptionExerciseAssignment(
+            eae_id="E1", account_id="U77", conid=3, symbol="AAA", underlying_symbol="AAA",
+            transaction_type="Buy", event_date=date(2026, 2, 1), quantity=Decimal("100"),
+        ))
+        # 300 shares sold for +300 in total: only the 100 received by assignment are wheel.
+        s.add(Trade(
+            trade_id="stk", ib_order_id="S", account_id="U77", conid=3, symbol="AAA",
+            asset_class="STK", currency="USD", trade_date=date(2026, 4, 1),
+            trade_datetime=datetime(2026, 4, 1, 14, 0), buy_sell="SELL", open_close="C",
+            quantity=Decimal("-300"), trade_price=Decimal("1"), proceeds=Decimal("300"),
+            net_cash=Decimal("300"), fifo_pnl_realized=Decimal("300"), fx_rate_to_base=Decimal("1"),
+        ))
+        s.commit()
+        t = options_pnl_attribution(s)["totals"]
+    assert t["short_premium_base"] == pytest.approx(100.0)
+    assert t["long_premium_base"] == pytest.approx(900.0)
+    assert t["wheel_stock_base"] == pytest.approx(100.0)        # 100 of 300 shares
+    assert t["non_options_stock_base"] == pytest.approx(200.0)  # the remaining shares
+    assert t["grand_total_base"] == pytest.approx(100 + 900 + 100 + 200)
+
+
+def test_assignment_rate_ignores_booktrade_close_rows():
+    with SessionLocal() as s:
+        s.add(Account(account_id="U77", base_currency="USD"))
+        s.flush()
+        s.add(Instrument(conid=1, symbol="BBB   260918C00050000", asset_class="OPT", multiplier=Decimal("100")))
+        s.flush()
+        s.add(_opt_trade("real", 1, "BBB   260918C00050000", "SELL", "50"))
+        s.add(_opt_trade("book", 1, "BBB   260918C00050000", "SELL", "0", ttype="BookTrade", notes="Ex"))
+        s.commit()
+        out = options_assignment_rate(s)
+    assert out["totals"]["sold_to_close"] == 1

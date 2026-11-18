@@ -7,7 +7,7 @@ Extracted from `metrics.py` (god-module split — same pattern as
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -179,15 +179,25 @@ def _classify_multi_leg(group: list[tuple[Trade, Instrument | None]]) -> str | N
 
 
 def _strategy_hint(t: Trade, instr: Instrument | None) -> str:
-    """Single-leg fallback classification after multi-leg grouping."""
+    """Single-leg classification after multi-leg grouping.
+
+    Labels follow the position the row belongs to, taken from `open_close`
+    (Flex reports SELL quantities as negative on every sale, so the sign says
+    nothing about shorting): a closing BUY ends a short, a closing SELL ends a
+    long. A row without `open_close` is read as an opening row.
+    """
     ac = (t.asset_class or "").upper()
-    qty = t.quantity or 0
     side = (t.buy_sell or "").upper()
+    closing = is_closed(t.open_close)
+    # Position side the row belongs to.
+    short_position = (side == "SELL" and not closing) or (side == "BUY" and closing)
     if ac == "STK":
+        if not t.open_close:
+            return "Stock long" if side == "BUY" else "Stock sell" if side == "SELL" else "Stock"
         if side == "BUY":
-            return "Stock long"
+            return "Stock cover" if closing else "Stock long"
         if side == "SELL":
-            return "Stock short" if qty < 0 else "Stock close"
+            return "Stock close" if closing else "Stock short"
         return "Stock"
     if ac == "OPT":
         # IBKR option symbols don't directly carry put/call in the Trade row,
@@ -197,17 +207,56 @@ def _strategy_hint(t: Trade, instr: Instrument | None) -> str:
         if not opt_type:
             opt_type = _enrich_option(t.symbol, instr).right or ""
         leg = "put" if opt_type == "P" else "call" if opt_type == "C" else "option"
-        # short premium-collecting trades have negative quantity after SELL
-        if side == "SELL":
-            return f"Short {leg}"
-        if side == "BUY":
-            return f"Long {leg}"
-        return f"Option {leg}"
+        if side not in ("BUY", "SELL"):
+            return f"Option {leg}"
+        return f"{'Short' if short_position else 'Long'} {leg}"
     if ac in ("FUT", "FOP"):
         return f"{ac} {side.lower()}".strip()
     if ac == "CASH":
         return "FX"
     return ac or "Trade"
+
+
+def multi_leg_labels(
+    session: Session,
+    order_keys: set[tuple[str, date, str]],
+) -> tuple[dict[str, str], dict[str, int]]:
+    """Strategy label and leg count per trade_id for multi-leg orders.
+
+    `order_keys` are `(ib_order_id, trade_date, account_id)` triples. Every
+    trade sharing a key is fetched (bypassing any asset-class filter so stock +
+    option combos classify). A group is multi-leg only with at least two
+    distinct conids: several fills of one contract are one leg. Fills of the
+    same conid are merged before classification.
+    """
+    labels: dict[str, str] = {}
+    legs_count: dict[str, int] = {}
+    if not order_keys:
+        return labels, legs_count
+    order_ids = {oid for oid, _, _ in order_keys}
+    sibling_q = (
+        select(Trade, Instrument)
+        .join(Instrument, Instrument.conid == Trade.conid, isouter=True)
+        .where(Trade.ib_order_id.in_(order_ids))
+    )
+    groups: dict[tuple[str, date, str], list[tuple[Trade, Instrument | None]]] = {}
+    for t, instr in session.execute(sibling_q):
+        if not (t.ib_order_id and t.trade_date and t.account_id):
+            continue
+        groups.setdefault((t.ib_order_id, t.trade_date, t.account_id), []).append((t, instr))
+    for key, group in groups.items():
+        if key not in order_keys:
+            continue
+        legs: dict[int, tuple[Trade, Instrument | None]] = {}
+        for t, instr in group:
+            legs.setdefault(t.conid, (t, instr))  # first fill represents the leg
+        if len(legs) < 2:
+            continue
+        label = _classify_multi_leg(list(legs.values())) or f"Multi-leg ({len(legs)})"
+        for t, _ in group:
+            labels[t.trade_id] = label
+            legs_count[t.trade_id] = len(legs)
+    return labels, legs_count
 
 
 def trades_list(
@@ -217,6 +266,7 @@ def trades_list(
     account_id: str | None = None,
     symbol: str | None = None,
     asset_class: str | None = None,
+    strategy: str | None = None,
     status: str = "all",
     limit: int = 200,
     offset: int = 0,
@@ -226,55 +276,73 @@ def trades_list(
     `status`: 'all' | 'open' | 'closed'
       - 'open'  := open_close == 'O' (or null) and fifo_pnl_realized is null/zero
       - 'closed':= open_close == 'C' and fifo_pnl_realized is not null
+    `strategy`: exact strategy label; filtered on the server BEFORE paging.
+
+    The summary win/loss/BE statistics are always taken over closed trades
+    (never over opening fills, whose P&L is 0), one result per order: fills of
+    the same `ib_order_id` are summed. `open_count` counts opening fills and
+    `closed_count` closed orders under the same filters.
     """
     base_pnl = func.coalesce(Trade.fifo_pnl_realized * func.coalesce(Trade.fx_rate_to_base, 1), 0)
     base_proceeds = func.coalesce(Trade.proceeds * func.coalesce(Trade.fx_rate_to_base, 1), 0)
     base_commission = func.coalesce(Trade.ib_commission * func.coalesce(Trade.fx_rate_to_base, 1), 0)
 
-    q = select(
-        Trade,
-        Instrument,
-        base_pnl.label("pnl_base"),
-        base_proceeds.label("proceeds_base"),
-        base_commission.label("commission_base"),
-    ).join(Instrument, Instrument.conid == Trade.conid, isouter=True)
-
-    q = _apply_period(q, Trade.trade_date, period)
-    if account_id:
-        q = q.where(Trade.account_id == account_id)
-    if symbol:
-        q = q.where(Trade.symbol == symbol)
-    if asset_class:
-        q = q.where(Trade.asset_class == asset_class)
+    def scope(q):
+        """Period / account / symbol / asset-class filters shared by every query."""
+        q = _apply_period(q, Trade.trade_date, period)
+        if account_id:
+            q = q.where(Trade.account_id == account_id)
+        if symbol:
+            q = q.where(Trade.symbol == symbol)
+        if asset_class:
+            q = q.where(Trade.asset_class == asset_class)
+        return q
 
     s = (status or "all").lower()
-    if s == "closed":
-        q = q.where(is_closed_filter())
-    elif s == "open":
-        q = q.where(is_open_filter())
 
-    # Aggregate stats over the SAME filter (before paging)
-    closed_only = q.subquery()
-    realized_total = session.execute(
-        select(func.coalesce(func.sum(closed_only.c.pnl_base), 0))
-    ).scalar() or 0
-    win_count = session.execute(
-        select(func.count()).where(closed_only.c.pnl_base > 0)
-    ).scalar() or 0
-    loss_count = session.execute(
-        select(func.count()).where(closed_only.c.pnl_base < 0)
-    ).scalar() or 0
-    be_count = session.execute(
-        select(func.count()).where(closed_only.c.pnl_base == 0)
-    ).scalar() or 0
-    total_count = session.execute(select(func.count()).select_from(closed_only)).scalar() or 0
-    win_sum = session.execute(
-        select(func.coalesce(func.sum(closed_only.c.pnl_base), 0))
-        .where(closed_only.c.pnl_base > 0)
-    ).scalar() or 0
-    loss_sum = session.execute(
-        select(func.coalesce(func.sum(closed_only.c.pnl_base), 0))
-        .where(closed_only.c.pnl_base < 0)
+    # Strategy labels need sibling legs of the same order, so they are computed
+    # in Python over the whole filtered set (a few thousand rows at most), which
+    # also yields the list of selectable strategies and the server-side filter.
+    label_rows = list(session.execute(
+        scope(select(Trade, Instrument).join(Instrument, Instrument.conid == Trade.conid, isouter=True))
+    ))
+    multi_label, multi_legs = multi_leg_labels(session, {
+        (t.ib_order_id, t.trade_date, t.account_id)
+        for t, _ in label_rows
+        if t.ib_order_id and t.trade_date and t.account_id
+    })
+    label_by_trade = {
+        t.trade_id: multi_label.get(t.trade_id) or _strategy_hint(t, instr)
+        for t, instr in label_rows
+    }
+    strategies = sorted(set(label_by_trade.values()))
+    strategy_ids = (
+        [tid for tid, lab in label_by_trade.items() if lab == strategy] if strategy else None
+    )
+
+    def scoped(q):
+        q = scope(q)
+        if strategy_ids is not None:
+            q = q.where(Trade.trade_id.in_(strategy_ids))
+        return q
+
+    # Closed statistics: one result per order, independent of `status`.
+    order_key = func.coalesce(Trade.ib_order_id, Trade.trade_id)
+    orders = (
+        scoped(select(func.sum(base_pnl).label("pnl")).where(is_closed_filter()))
+        .group_by(Trade.account_id, order_key)
+        .subquery()
+    )
+    win_count, win_sum = session.execute(
+        select(func.count(), func.coalesce(func.sum(orders.c.pnl), 0)).where(orders.c.pnl > 0)
+    ).one()
+    loss_count, loss_sum = session.execute(
+        select(func.count(), func.coalesce(func.sum(orders.c.pnl), 0)).where(orders.c.pnl < 0)
+    ).one()
+    be_count = session.execute(select(func.count()).where(orders.c.pnl == 0)).scalar() or 0
+    realized_total = float(win_sum or 0) + float(loss_sum or 0)
+    open_count = session.execute(
+        scoped(select(func.count(Trade.trade_id)).where(is_open_filter()))
     ).scalar() or 0
 
     decided = int(win_count) + int(loss_count)
@@ -284,59 +352,50 @@ def trades_list(
     avg_winner = (float(win_sum) / int(win_count)) if int(win_count) > 0 else None
     avg_loser = (float(loss_sum) / int(loss_count)) if int(loss_count) > 0 else None
 
+    q = scoped(
+        select(
+            Trade,
+            Instrument,
+            base_pnl.label("pnl_base"),
+            base_proceeds.label("proceeds_base"),
+            base_commission.label("commission_base"),
+        ).join(Instrument, Instrument.conid == Trade.conid, isouter=True)
+    )
+    if s == "closed":
+        q = q.where(is_closed_filter())
+    elif s == "open":
+        q = q.where(is_open_filter())
+    total_count = session.execute(select(func.count()).select_from(q.subquery())).scalar() or 0
+
     q = q.order_by(Trade.trade_datetime.desc()).limit(limit).offset(offset)
     page_trades = list(session.execute(q))
 
-    # Batch-fetch dividends + first-buy dates for the conids on this page so each
-    # row can compute total-return-with-dividends without N+1 queries.
-    conids_on_page = {t.conid for t, _instr, *_ in page_trades if t.conid is not None}
+    # Dividends belong on closing rows only, over the window since the previous
+    # closing date of the symbol (so overlapping windows never repeat a
+    # dividend), and on one row per symbol and day.
+    closing_symbols = {t.symbol for t, *_ in page_trades if is_closed(t.open_close)}
+    conids_on_page = {t.conid for t, *_ in page_trades if t.conid is not None}
     div_by_conid = _dividends_by_conid(session, account_id, conids_on_page)
     first_buy_by_symbol = _first_buy_dates(session, account_id, {t.symbol for t, *_ in page_trades})
-
-    # Multi-leg classification: fetch ALL trades sharing a page row's order_id +
-    # trade_date, group them, classify, and produce a lookup keyed by trade_id.
-    # This catches multi-legs whose legs straddle page boundaries.
-    multi_strategy_by_trade: dict[str, str] = {}
-    multi_legs_count_by_trade: dict[str, int] = {}
-    order_keys = {
-        (t.ib_order_id, t.trade_date, t.account_id)
-        for t, *_ in page_trades
-        if t.ib_order_id and t.trade_date and t.account_id
-    }
-    if order_keys:
-        order_ids = {oid for oid, _, _ in order_keys}
-        sibling_q = (
-            select(Trade, Instrument)
-            .join(Instrument, Instrument.conid == Trade.conid, isouter=True)
-            .where(Trade.ib_order_id.in_(order_ids))
-        )
-        siblings = list(session.execute(sibling_q))
-        groups: dict[tuple[str, date, str], list[tuple[Trade, Instrument | None]]] = {}
-        for t, instr in siblings:
-            if not (t.ib_order_id and t.trade_date and t.account_id):
-                continue
-            groups.setdefault((t.ib_order_id, t.trade_date, t.account_id), []).append((t, instr))
-        for key, group in groups.items():
-            if key not in order_keys or len(group) < 2:
-                continue
-            label = _classify_multi_leg(group) or f"Multi-leg ({len(group)})"
-            for t, _ in group:
-                multi_strategy_by_trade[t.trade_id] = label
-                multi_legs_count_by_trade[t.trade_id] = len(group)
+    close_days = _close_days_by_symbol(session, account_id, closing_symbols)
 
     rows: list[dict] = []
     for t, instr, pnl_b, proceeds_b, comm_b in page_trades:
-        # Holding window: from the earliest BUY of this symbol (in the user's
-        # history) up to this trade's date. This overstates dividend attribution
-        # for symbols that have been traded in and out — accurate per-lot
-        # attribution would need FIFOPerformanceSummary parsing.
         hold_start = first_buy_by_symbol.get(t.symbol) or t.trade_date
-        divs = sum(
-            amt for d, amt in div_by_conid.get(t.conid, [])
-            if d is not None and t.trade_date is not None and hold_start <= d <= t.trade_date
-        )
+        closing = is_closed(t.open_close)
+        divs = 0.0
+        if closing:
+            days = close_days.get(t.symbol, [])
+            primary = next((tid for d, tid in days if d == t.trade_date), None)
+            if primary == t.trade_id:
+                prev_close = max((d for d, _ in days if d < t.trade_date), default=None)
+                window_start = prev_close or (hold_start - timedelta(days=1))
+                divs = sum(
+                    amt for d, amt in div_by_conid.get(t.conid, [])
+                    if d is not None and window_start < d <= t.trade_date
+                )
         pnl_b_f = _f(pnl_b)
-        total_return_base = (pnl_b_f or 0.0) + divs if (pnl_b_f is not None or divs) else None
+        total_return_base = (pnl_b_f or 0.0) + divs if closing else None
         # Total return % is relative to absolute proceeds (a coarse approximation;
         # cost_basis isn't on Trade rows directly).
         proceeds_abs = abs(_f(proceeds_b) or 0.0)
@@ -372,11 +431,11 @@ def trades_list(
             "total_return_pct": total_return_pct,
             "hold_start": hold_start.isoformat() if hold_start else None,
             "multiplier": _f(t.multiplier),
-            "strategy": multi_strategy_by_trade.get(t.trade_id) or _strategy_hint(t, instr),
-            "strategy_legs": multi_legs_count_by_trade.get(t.trade_id, 1),
-            "is_multi_leg": t.trade_id in multi_strategy_by_trade,
+            "strategy": label_by_trade.get(t.trade_id) or _strategy_hint(t, instr),
+            "strategy_legs": multi_legs.get(t.trade_id, 1),
+            "is_multi_leg": t.trade_id in multi_label,
             "is_open": is_open(t.open_close),
-            "is_closed": is_closed(t.open_close),
+            "is_closed": closing,
             "is_winner": bool(pnl_b and float(pnl_b) > 0),
             "is_loser": bool(pnl_b and float(pnl_b) < 0),
         })
@@ -385,12 +444,15 @@ def trades_list(
         "rows": rows,
         "limit": limit,
         "offset": offset,
+        "strategies": strategies,
         "summary": {
             "total": int(total_count),
+            "open_count": int(open_count),
+            "closed_count": int(win_count) + int(loss_count) + int(be_count),
             "win": int(win_count),
             "loss": int(loss_count),
             "be": int(be_count),
-            "realized_total_base": _f(realized_total),
+            "realized_total_base": realized_total,
             "win_rate": win_rate,
             "profit_factor": profit_factor,
             "avg_winner_base": avg_winner,
@@ -399,6 +461,27 @@ def trades_list(
             "loss_sum_base": _f(loss_sum),
         },
     }
+
+
+def _close_days_by_symbol(
+    session: Session,
+    account_id: str | None,
+    symbols: set[str],
+) -> dict[str, list[tuple[date, str]]]:
+    """{symbol: [(closing trade_date, first closing trade_id of that day)]}."""
+    if not symbols:
+        return {}
+    q = (
+        select(Trade.symbol, Trade.trade_date, func.min(Trade.trade_id))
+        .where(Trade.symbol.in_(symbols), is_closed_filter())
+        .group_by(Trade.symbol, Trade.trade_date)
+    )
+    if account_id:
+        q = q.where(Trade.account_id == account_id)
+    out: dict[str, list[tuple[date, str]]] = {}
+    for sym, d, tid in session.execute(q):
+        out.setdefault(sym, []).append((d, tid))
+    return out
 
 
 # ====================================================================

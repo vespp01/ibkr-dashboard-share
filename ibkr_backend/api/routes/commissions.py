@@ -8,7 +8,6 @@ from ...analytics import (
     commissions_breakdown,
     commissions_summary,
     commissions_timeseries,
-    transaction_fees_summary,
 )
 from ..deps import PeriodDep, SessionDep
 
@@ -36,17 +35,6 @@ def timeseries(
 ):
     return commissions_timeseries(
         session, period=period, account_id=account_id, bucket=bucket
-    )
-
-
-@router.get("/transaction-fees")
-def transaction_fees(
-    session: SessionDep,
-    period: PeriodDep,
-    account_id: str | None = Query(None),
-):
-    return transaction_fees_summary(
-        session, period=period, account_id=account_id
     )
 
 

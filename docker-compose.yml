@@ -10,17 +10,32 @@
 # Persistent state:
 #   - `db_data` named volume holds /app/data/ibkr_backend.db (SQLite)
 #   - `./Extractos` is bind-mounted read-only into the backend for legacy CSV/PDFs
+#   - `TAX_SCENARIOS_HOST_DIR` is optionally mounted read-only for tax scenarios
+#   - nightly SQLite backups (03:45, newest 14 kept) land in
+#     `${IBKR_BACKUP_DIR:-${HOME}/.ibkr-backups}` on the host (outside ~/Documents)
 #
 # To wipe state and start over:  docker compose down -v
+
+# json-file logs grow without bound by default; cap every service (3 x 10 MB).
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
 
 services:
   backend:
     build:
       context: .
       dockerfile: ibkr_backend/Dockerfile
-    image: ${BACKEND_IMAGE:-ibkr-backend:dev}
+    image: ${BACKEND_IMAGE:-ibkr-backend:local}
     container_name: ${BACKEND_CONTAINER_NAME:-ibkr-backend}
     restart: unless-stopped
+    logging: *default-logging
+    # SYS_PTRACE lets the watchdog run `py-spy dump --pid 1` to capture a
+    # thread stack of a wedged scheduler before restarting (see watchdog.sh).
+    cap_add:
+      - SYS_PTRACE
     env_file:
       - .env
     environment:
@@ -28,20 +43,26 @@ services:
       API_HOST: 0.0.0.0
       API_PORT: "8000"
       # APScheduler fires in the container TZ; without this, PIPELINE_CRON
-      # times are UTC, not local (see CLAUDE.md gotcha).
+      # times are UTC, not local (APScheduler fires in the container TZ).
       TZ: ${TZ:-Europe/Zurich}
       DATABASE_URL: sqlite:////app/data/ibkr_backend.db
-      WATCHLIST_FILE: /app/watchlists.yaml
+      # Nightly online backup (ibkr_backend/jobs/backup.py) into the bind mount below.
+      BACKUP_DIR: /backups
       # CORS doesn't matter when the SPA goes through nginx /api proxy, but we keep
       # it permissive so a local browser hitting :8000 directly still works.
       CORS_ORIGINS: "http://localhost:5173,http://localhost:8080,http://127.0.0.1:5173"
     volumes:
       - db_data:/app/data
       - ./Extractos:/app/Extractos:ro
-      - ./watchlists.yaml:/app/watchlists.yaml:ro
       - ./price_alerts.yaml:/app/price_alerts.yaml:ro
+      - ${TAX_SCENARIOS_HOST_DIR:-./data/tax-scenarios}:/app/tax-scenarios:ro
+      # ${HOME}, not ~: compose does not reliably expand ~ in interpolated values.
+      - ${IBKR_BACKUP_DIR:-${HOME}/.ibkr-backups}:/backups
+      # OptionsLab management signals only (read-only subdir; OPTIONSLAB_SIGNALS_PATH picks the file).
+      - ${HOME}/.local/state/optionslab/signals:/optionslab:ro
+    # Loopback only: local consumers read 127.0.0.1:8001.
     ports:
-      - "${BACKEND_HOST_PORT:-8001}:8000"
+      - "127.0.0.1:${BACKEND_HOST_PORT:-8001}:8000"
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8000/health"]
       interval: 30s
@@ -53,14 +74,17 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    image: ${FRONTEND_IMAGE:-ibkr-frontend:dev}
+    image: ${FRONTEND_IMAGE:-ibkr-frontend:local}
     container_name: ${FRONTEND_CONTAINER_NAME:-ibkr-frontend}
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       backend:
         condition: service_healthy
+    # Loopback only. The tailnet reaches it through `tailscale serve`
+    # (tcp 5173 -> 127.0.0.1:5173), so the LAN does not.
     ports:
-      - "${FRONTEND_HOST_PORT:-5173}:80"
+      - "127.0.0.1:${FRONTEND_HOST_PORT:-5173}:80"
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1/", "-o", "/dev/null"]
       interval: 30s
@@ -68,22 +92,51 @@ services:
       start_period: 5s
       retries: 3
 
+  # Scheduler watchdog — a separate process that restarts the backend when its
+  # APScheduler goes silent (see deploy/watchdog/watchdog.sh). The
+  # backend's own healthcheck can't see an in-process scheduler wedge; this can.
+  watchdog:
+    # Holds docker.sock (root-equivalent), so the image is pinned by digest: the
+    # Docker CLI 29.7.2 index the live watchdog already ran (built 2026-08-10).
+    # Bump deliberately: `docker buildx imagetools inspect docker:<version>-cli`.
+    image: docker:29.7.2-cli@sha256:000bb62ff495f986c9f5578eb67cc2cb98b91138eda81d7762d5371eb8a497fe
+    container_name: ${WATCHDOG_CONTAINER_NAME:-ibkr-watchdog}
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      backend:
+        condition: service_healthy   # start clean once the API is up (no boot-race strike)
+    environment:
+      BACKEND_URL: http://backend:8000
+      TARGET_CONTAINER: ${BACKEND_CONTAINER_NAME:-ibkr-backend}
+      CHECK_INTERVAL: "${WATCHDOG_CHECK_INTERVAL:-300}"
+      HEARTBEAT_STALE_SECONDS: "${WATCHDOG_HEARTBEAT_STALE_SECONDS:-1800}"
+      # Pull-job dispatch wedge: heartbeat fresh but no pull fired in this long
+      # (default 3h = 3 missed hourly TC pulls). Catches the 2026-08-22 incident.
+      PULL_ATTEMPT_STALE_SECONDS: "${WATCHDOG_PULL_ATTEMPT_STALE_SECONDS:-10800}"
+      RESTART_COOLDOWN_SECONDS: "${WATCHDOG_COOLDOWN_SECONDS:-5400}"
+      DRY_RUN: "${WATCHDOG_DRY_RUN:-0}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./deploy/watchdog/watchdog.sh:/watchdog.sh:ro
+      - ./deploy/watchdog/dumps:/dumps   # py-spy / faulthandler dumps captured on a wedge
+    entrypoint: ["/bin/sh", "/watchdog.sh"]
+
   bootstrap:
-    image: ${BACKEND_IMAGE:-ibkr-backend:dev}
+    image: ${BACKEND_IMAGE:-ibkr-backend:local}
     build:
       context: .
       dockerfile: ibkr_backend/Dockerfile
+    logging: *default-logging
     profiles:
       - tools
     env_file:
       - .env
     environment:
       DATABASE_URL: sqlite:////app/data/ibkr_backend.db
-      WATCHLIST_FILE: /app/watchlists.yaml
     volumes:
       - db_data:/app/data
       - ./Extractos:/app/Extractos:ro
-      - ./watchlists.yaml:/app/watchlists.yaml:ro
       - ./price_alerts.yaml:/app/price_alerts.yaml:ro
     command: ["python", "-m", "ibkr_backend.cli", "bootstrap-if-empty", "--years", "4"]
 

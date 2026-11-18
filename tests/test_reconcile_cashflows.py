@@ -131,7 +131,7 @@ def test_reconcile_applies_fx_rate():
 
 
 def test_reconcile_ignores_non_cashflow_types():
-    """Only Deposits/Withdrawals and Internal Transfers count; dividends etc. must be ignored."""
+    """Only Deposits/Withdrawals count; dividends etc. must be ignored."""
     d = date(2024, 3, 5)
     account = "U6666"
 
@@ -153,8 +153,9 @@ def test_reconcile_ignores_non_cashflow_types():
     assert nav.external_cashflow == Decimal("0")
 
 
-def test_reconcile_includes_internal_transfers():
-    """Internal Transfers count the same as Deposits/Withdrawals."""
+def test_reconcile_ignores_dead_internal_transfers_type():
+    """`Internal Transfers` was a dead cash type (0 rows ever; in-kind transfers
+    live in ChangeInNAV `assetTransfers`) and no longer counts."""
     d = date(2024, 4, 20)
     account = "U5555"
 
@@ -169,7 +170,7 @@ def test_reconcile_includes_internal_transfers():
     with session_scope() as s:
         nav = s.get(NavDaily, (d, account))
 
-    assert nav.external_cashflow == Decimal("2500.00")
+    assert nav.external_cashflow == Decimal("0")
 
 
 def test_reconcile_returns_zero_when_nothing_changes():

@@ -32,6 +32,7 @@ from ..db.models import (
 )
 from ._common import _f
 from .filters import PeriodFilter
+from .fx_table import FxTable
 
 # Reg-T maintenance margin requirement per asset class (conservative defaults).
 # Real IBKR Portfolio Margin numbers will usually be 30–50 % lower for diversified books.
@@ -59,6 +60,14 @@ _INIT_MARGIN_PCT = {  # Reg-T 50 % initial for stocks; same other classes
 # Interest-related cash-transaction type strings IBKR uses.
 _INTEREST_PAID = ("Broker Interest Paid", "Bond Interest Paid")
 _INTEREST_RECV = ("Broker Interest Received", "Bond Interest Received")
+
+
+def _is_syep(description: str | None) -> bool:
+    """Stock Yield Enhancement Program income is posted as "Broker Interest
+    Received" too ("… IBKR MANAGED SECURITIES (SYEP) INTEREST …"), but it is
+    stock-lending income, not interest on cash."""
+    text = (description or "").upper()
+    return "SYEP" in text or "MANAGED SECURITIES" in text
 
 # Warning thresholds.
 _LEVERAGE_WARN = 1.30        # gross/NAV
@@ -104,14 +113,18 @@ def margin_summary(
     cash_rows = session.execute(cash_q).scalars().all()
     cash_by_currency = []
     cash_debt_native_sum = 0.0
+    fx_table = FxTable(session, base_currency)
     for r in cash_rows:
         ending = _f(r.ending_cash) or 0.0
         is_debt = ending < 0
         if is_debt:
             cash_debt_native_sum += abs(ending)
+        ending_base = fx_table.convert(ending, r.currency, snap)  # None if no Flex rate
         cash_by_currency.append({
             "currency": r.currency,
             "ending_cash": ending,
+            "ending_cash_base": ending_base,
+            "pct_of_nav": (ending_base / nav_total * 100) if (nav_total and ending_base is not None) else None,
             "is_debt": is_debt,
         })
 
@@ -158,6 +171,9 @@ def margin_summary(
     excess_liq_estimate = nav_total - maint_estimate
     cushion_pct = (excess_liq_estimate / nav_total * 100) if nav_total else None
     buying_power_estimate = nav_total - init_estimate  # very rough — actual BP depends on PM/Reg-T regime
+    # Liquidity = NAV cash (net of any per-currency debt) / NLV.
+    nav_cash = _f(nav.cash) if nav else None
+    cash_pct_nlv = (nav_cash / nav_total * 100) if (nav_total and nav_cash is not None) else None
 
     # Top N concentration (by |value|).
     positions.sort(key=lambda r: abs(r["position_value_base"]), reverse=True)
@@ -185,13 +201,14 @@ def margin_summary(
         "base_currency": base_currency,
         "nav_total": nav_total,
         "nav_breakdown": {
-            "cash": _f(nav.cash) if nav else None,
+            "cash": nav_cash,
             "stock": _f(nav.stock) if nav else None,
             "options": _f(nav.options) if nav else None,
             "bonds": _f(nav.bonds) if nav else None,
         },
         "cash_by_currency": cash_by_currency,
         "cash_debt_native_sum": cash_debt_native_sum,
+        "cash_pct_nlv": cash_pct_nlv,
         "exposure": {
             "longs_base": longs_base,
             "shorts_base": shorts_base,
@@ -224,14 +241,25 @@ def margin_interest_summary(
 ) -> dict[str, Any]:
     """Interest paid (margin) and received (cash) over the period.
 
-    Effective rate = paid / |avg negative cash balance| × 365 / days
-    The avg-negative-cash is computed across days that had any debt and across
-    all currencies, then converted to base currency at the row's spot rate.
+    Effective rate = paid / avg debt (base) × 365 / calendar span.
+    Each currency's negative cash balance is converted to base with `fx_rates`
+    of that day (`BASE` summary row excluded) and averaged over all snapshot
+    days of the period. Per-currency APR is reported in `paid_by_currency`.
+
+    The cash side mirrors it: credit interest on cash / avg positive cash
+    balance (base) × 365 / span = effective yield, per currency in
+    `received_by_currency`. SYEP stock-lending income is reported apart
+    (`syep_*`) and kept out of the cash yield. Interest is posted monthly in
+    arrears (settle date ≈ 3rd business day of the next month), on both sides.
     """
     paid_native: dict[str, float] = {}
     paid_base_by_ccy: dict[str, float] = {}
     recv_native: dict[str, float] = {}
     recv_base_by_ccy: dict[str, float] = {}
+    cash_int_native: dict[str, float] = {}     # credit interest on cash
+    cash_int_base_by_ccy: dict[str, float] = {}
+    syep_native: dict[str, float] = {}         # stock-lending income
+    syep_base_by_ccy: dict[str, float] = {}
     paid_total_base = 0.0
     recv_total_base = 0.0
 
@@ -258,8 +286,17 @@ def margin_interest_summary(
             recv_native[ccy] = recv_native.get(ccy, 0.0) + amt
             recv_base_by_ccy[ccy] = recv_base_by_ccy.get(ccy, 0.0) + amt_base
             recv_total_base += amt_base
+            if _is_syep(tx.description):
+                syep_native[ccy] = syep_native.get(ccy, 0.0) + amt
+                syep_base_by_ccy[ccy] = syep_base_by_ccy.get(ccy, 0.0) + amt_base
+            else:
+                cash_int_native[ccy] = cash_int_native.get(ccy, 0.0) + amt
+                cash_int_base_by_ccy[ccy] = cash_int_base_by_ccy.get(ccy, 0.0) + amt_base
 
-    # Average debt during the period — sum of negative ending_cash across days, normalised.
+    # Average debt during the period, per currency, converted to base with the
+    # Flex fx_rates of each snapshot day. The `BASE` row of the cash report is a
+    # summary of the other currencies and is excluded. The average runs over all
+    # snapshot days of the period (days without debt count as zero).
     debt_q = select(
         CashReportRow.snapshot_date,
         CashReportRow.currency,
@@ -272,29 +309,68 @@ def margin_interest_summary(
     if period and period.end:
         debt_q = debt_q.where(CashReportRow.snapshot_date <= period.end)
 
-    debt_days: dict[date, float] = {}  # day → total |negative cash| in *native* (mixed currencies)
+    fx_table = FxTable(session)
+    snapshot_days: set[date] = set()
+    debt_days: dict[date, float] = {}          # day -> total debt in base
+    debt_sum_by_ccy: dict[str, float] = {}     # ccy -> sum over days of debt in base
+    cash_days: dict[date, float] = {}          # day -> total positive cash in base
+    cash_sum_by_ccy: dict[str, float] = {}     # ccy -> sum over days of positive cash in base
     for d, ccy, ec in session.execute(debt_q):
+        if ccy == "BASE":
+            continue
+        snapshot_days.add(d)
         ec_f = float(ec or 0)
-        if ec_f < 0:
-            debt_days[d] = debt_days.get(d, 0.0) + abs(ec_f)
+        if ec_f == 0:
+            continue
+        rate = fx_table.rate(ccy, d)
+        if rate is None:
+            continue
+        if ec_f > 0:
+            cash_base = ec_f * rate
+            cash_days[d] = cash_days.get(d, 0.0) + cash_base
+            cash_sum_by_ccy[ccy] = cash_sum_by_ccy.get(ccy, 0.0) + cash_base
+            continue
+        debt_base = abs(ec_f) * rate
+        debt_days[d] = debt_days.get(d, 0.0) + debt_base
+        debt_sum_by_ccy[ccy] = debt_sum_by_ccy.get(ccy, 0.0) + debt_base
 
-    if debt_days:
-        avg_debt_native = sum(debt_days.values()) / len(debt_days)
+    if snapshot_days:
+        n_days = len(snapshot_days)
+        avg_debt_base = sum(debt_days.values()) / n_days
+        avg_cash_base = sum(cash_days.values()) / n_days
         days_covered = len(debt_days)
-        span_days = (max(debt_days.keys()) - min(debt_days.keys())).days + 1
+        # Calendar span of the snapshots: each snapshot day stands for
+        # span/n calendar days (weekends carry the previous balance).
+        span_days = (max(snapshot_days) - min(snapshot_days)).days + 1
     else:
-        avg_debt_native = 0.0
+        n_days = 0
+        avg_debt_base = 0.0
+        avg_cash_base = 0.0
         days_covered = 0
         span_days = 0
 
-    # Note: this avg is in mixed native currencies, summed naively — gives the order of
-    # magnitude. For precise rate, compute per-currency below.
     paid_abs_base = abs(paid_total_base)
     effective_apr = None
-    if avg_debt_native > 0 and span_days > 0:
-        # Approximate: treat avg_debt_native as base-currency-equivalent (ok for CHF
-        # cash debt which is typically the largest piece).
-        effective_apr = paid_abs_base / avg_debt_native * 365 / span_days * 100
+    if avg_debt_base > 0 and span_days > 0:
+        effective_apr = paid_abs_base / avg_debt_base * 365 / span_days * 100
+
+    def _annualised(amount_base: float, avg_base: float) -> float | None:
+        if avg_base <= 0 or span_days <= 0:
+            return None
+        return amount_base / avg_base * 365 / span_days * 100
+
+    cash_int_total_base = sum(cash_int_base_by_ccy.values())
+    syep_total_base = sum(syep_base_by_ccy.values())
+    effective_cash_yield = _annualised(cash_int_total_base, avg_cash_base)
+
+    apr_by_currency: dict[str, dict] = {}
+    for ccy, total in debt_sum_by_ccy.items():
+        avg_ccy = total / n_days
+        paid_ccy = abs(paid_base_by_ccy.get(ccy, 0.0))
+        apr_by_currency[ccy] = {
+            "avg_debt_base": avg_ccy,
+            "apr_pct": (paid_ccy / avg_ccy * 365 / span_days * 100) if avg_ccy > 0 and span_days > 0 else None,
+        }
 
     return {
         "period": {
@@ -309,21 +385,39 @@ def margin_interest_summary(
                 "currency": k,
                 "amount_native": v,
                 "amount_base": paid_base_by_ccy.get(k, 0.0),
+                "avg_debt_base": apr_by_currency.get(k, {}).get("avg_debt_base"),
+                "apr_pct": apr_by_currency.get(k, {}).get("apr_pct"),
             }
             for k, v in sorted(paid_native.items())
         ],
+        # Every currency that earned interest or held positive cash, so idle
+        # balances that earn nothing (below IBKR's per-currency threshold) show.
         "received_by_currency": [
             {
                 "currency": k,
-                "amount_native": v,
+                "amount_native": recv_native.get(k, 0.0),
                 "amount_base": recv_base_by_ccy.get(k, 0.0),
+                "cash_interest_native": cash_int_native.get(k, 0.0),
+                "cash_interest_base": cash_int_base_by_ccy.get(k, 0.0),
+                "syep_native": syep_native.get(k, 0.0),
+                "syep_base": syep_base_by_ccy.get(k, 0.0),
+                "avg_cash_base": (cash_sum_by_ccy.get(k, 0.0) / n_days) if n_days else 0.0,
+                "yield_pct": _annualised(
+                    cash_int_base_by_ccy.get(k, 0.0),
+                    (cash_sum_by_ccy.get(k, 0.0) / n_days) if n_days else 0.0,
+                ),
             }
-            for k, v in sorted(recv_native.items())
+            for k in sorted(set(recv_native) | set(cash_sum_by_ccy))
         ],
-        "avg_debt_native_sum": avg_debt_native,
+        "avg_debt_base": avg_debt_base,
         "days_with_debt": days_covered,
         "span_days": span_days,
         "effective_apr_pct": effective_apr,
+        "cash_interest_base": cash_int_total_base,
+        "syep_base": syep_total_base,
+        "avg_cash_base": avg_cash_base,
+        "days_with_cash": len(cash_days),
+        "effective_cash_yield_pct": effective_cash_yield,
     }
 
 

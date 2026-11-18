@@ -21,7 +21,6 @@ from ibkr_backend.analytics import (
 from ibkr_backend.analytics.filters import resolve_period
 from ibkr_backend.db import session_scope
 from ibkr_backend.flex.parser import parse_flex_xml
-from ibkr_backend.loaders.csv_loader import _parse_period
 from ibkr_backend.loaders.pipeline import dashboard_has_data, load_statement
 
 
@@ -163,14 +162,43 @@ def test_open_positions_prefer_summary_over_lots():
 
 
 def test_twr_series_is_chained(sample_flex_xml):
+    """Chained daily TWR: prod(1 + twr_t/100) - 1 over the fixture row plus two
+    hand-added days.
+
+    Fixture ChangeInNAV row (2025-01-31): twr = 7.6453 %.
+    Added rows: 2025-02-03 twr = +1.0 %, 2025-02-04 twr = -2.0 %.
+      day 1: 1.076453                 -> 7.6453 %
+      day 2: 1.076453 * 1.01 = 1.08721753   -> 8.721753 %
+      day 3: 1.08721753 * 0.98 = 1.0654731794 -> 6.54731794 %
+    Quality: 3 rows over 5 calendar days (coverage 0.6, max gap 3) -> reliable.
+    n_days = 2025-02-04 - base 2025-01-30 = 5.
+    """
+    from decimal import Decimal
+
+    from ibkr_backend.db.models import ChangeInNavDaily
+
     _seed(sample_flex_xml)
     with session_scope() as s:
+        for d, twr in ((date(2025, 2, 3), "1.0"), (date(2025, 2, 4), "-2.0")):
+            s.add(ChangeInNavDaily(
+                snapshot_date=d, account_id="U1234567", currency="EUR",
+                twr=Decimal(twr),
+            ))
+    with session_scope() as s:
         out = twr_series(s)
-        assert out["series"]
-        assert out["quality"]["is_reliable"] in (True, False)
-        assert out["raw_twr_pct"] is not None
-        # Daily returns must be finite
-        assert all(isinstance(p["cumulative_pct"], float) for p in out["series"])
+    assert out["quality"]["is_reliable"] is True
+    assert out["n_days"] == 5
+    assert out["base_date"] == "2025-01-30"
+    assert [p["date"] for p in out["series"]] == ["2025-01-31", "2025-02-03", "2025-02-04"]
+    assert [p["daily_return_pct"] for p in out["series"]] == pytest.approx(
+        [7.6453, 1.0, -2.0]
+    )
+    assert [p["cumulative_pct"] for p in out["series"]] == pytest.approx(
+        [7.6453, 8.721753, 6.54731794]
+    )
+    assert out["raw_twr_pct"] == pytest.approx(6.54731794)
+    assert out["twr_pct"] == pytest.approx(6.54731794)
+    assert out["annualised_pct"] is None  # 5 days < 365: not annualised
 
 
 def test_portfolio_overview_has_all_kpis(sample_flex_xml):
@@ -179,44 +207,41 @@ def test_portfolio_overview_has_all_kpis(sample_flex_xml):
         out = portfolio_overview(s, period=resolve_period(year=2025))
         for key in (
             "nav_base",
-            "deposits_withdrawals_base",
             "dividends",
             "commissions",
-            "interest",
-            "transaction_fees",
-            "realized_pnl_base",
             "unrealized",
             "income_projection",
-            "total_pnl_base",
             "freshness",
         ):
             assert key in out
+        # Pruned in P1.3: nothing renders these (and total_pnl_base was wrong).
+        for key in (
+            "nav_date",
+            "deposits_withdrawals_base",
+            "interest",
+            "transaction_fees",
+            "realized_pnl_base",
+            "total_pnl_base",
+        ):
+            assert key not in out
+        assert "cost_base" not in out["unrealized"]
 
 
 def test_sparse_twr_is_flagged_unreliable():
     from decimal import Decimal
 
-    from ibkr_backend.db.models import NavDaily
+    from ibkr_backend.db.models import ChangeInNavDaily
+
+    def cin(d, twr):
+        return ChangeInNavDaily(snapshot_date=d, account_id="U1", currency="CHF", twr=Decimal(twr))
 
     with session_scope() as s:
-        s.add_all(
-            [
-                NavDaily(snapshot_date=date(2024, 1, 1), account_id="U1", base_currency="CHF", nav_total=Decimal("10000"), external_cashflow=Decimal("0")),
-                NavDaily(snapshot_date=date(2024, 12, 31), account_id="U1", base_currency="CHF", nav_total=Decimal("20000"), external_cashflow=Decimal("0")),
-                NavDaily(snapshot_date=date(2025, 12, 31), account_id="U1", base_currency="CHF", nav_total=Decimal("30000"), external_cashflow=Decimal("0")),
-            ]
-        )
+        s.add_all([cin(date(2024, 1, 1), "1.0"), cin(date(2024, 12, 31), "2.0"), cin(date(2025, 12, 31), "3.0")])
         s.commit()
         out = twr_series(s, account_id="U1")
         assert out["quality"]["is_reliable"] is False
         assert out["twr_pct"] is None
         assert out["raw_twr_pct"] is not None
-
-
-def test_parse_period_accepts_statement_range():
-    start, end = _parse_period("20250101 - 20251231")
-    assert start == date(2025, 1, 1)
-    assert end == date(2025, 12, 31)
 
 
 def test_income_projection_present(sample_flex_xml):
@@ -319,10 +344,10 @@ def test_symbol_attribution_loads_and_aggregates():
         assert tsla["realized_pnl_base"] == -40.0
         assert tsla["unrealized_pnl_base"] == -15.0
         assert tsla["mtm_total_base"] == -42.0
-        # total = realized + unrealized + mtm
-        assert tsla["total_pnl_base"] == -40.0 + -15.0 + -42.0
+        # total = MTM period total (FIFO realized/unrealized are breakdown only)
+        assert tsla["total_pnl_base"] == -42.0
 
-        # Ordering: AAPL total = 120+0+88 = 208; TSLA = -97 → AAPL first by |total|.
+        # Ordering by |total|: AAPL mtm 88 vs TSLA mtm -42 → AAPL first.
         assert out["rows"][0]["symbol"] == "AAPL"
 
         # Period filter: shrink to only 2026-01-03 → AAPL realized must be 120,
@@ -408,7 +433,9 @@ def test_symbol_attribution_zeroes_stale_unrealized_for_closed_positions():
         assert rows["GONE"]["is_held"] is False
         assert rows["GONE"]["unrealized_pnl_base"] == 0.0
         assert rows["GONE"]["realized_pnl_base"] == 10.0
-        assert rows["GONE"]["total_pnl_base"] == 10.0
+        # The headline total is the MTM period total (0 in this fixture); the
+        # FIFO realized figure is a breakdown column and is not added on top.
+        assert rows["GONE"]["total_pnl_base"] == rows["GONE"]["mtm_total_base"] == 0.0
 
         # held_only drops the closed position entirely.
         out_held = symbol_attribution(s, period=period, held_only=True)
@@ -748,128 +775,123 @@ def test_canon_asset_class_maps_legacy_labels():
     assert canon("XYZ") == "XYZ"
 
 
+def _cin_flow_row(d, dw=0, at=0, twr="0"):
+    from decimal import Decimal
+
+    from ibkr_backend.db.models import ChangeInNavDaily
+
+    return ChangeInNavDaily(
+        snapshot_date=d, account_id="U1", currency="CHF", twr=Decimal(twr),
+        deposits_withdrawals=Decimal(str(dw)), asset_transfers=Decimal(str(at)),
+    )
+
+
 def test_xirr_converges_with_correct_sign_convention():
     """Regression: deposits must be NEGATIVE flows so pyxirr can converge.
 
-    Before the fix, every flow including terminal NAV was positive → xirr_pct
-    silently returned None. After the fix, a portfolio with deposits + terminal
-    NAV > deposits gives a positive money-weighted return.
+    Flows come from ChangeInNAV (`depositsWithdrawals + assetTransfers` on the
+    CIN date). A portfolio with deposits + terminal NAV > deposits gives a
+    positive money-weighted return; the all-time window is > 365 days so the
+    rate is annualised.
     """
-    from datetime import datetime
-
     from ibkr_backend.analytics.xirr import xirr_summary
-    from ibkr_backend.db.models import Account, CashTransaction, NavDaily
+    from ibkr_backend.db.models import Account, NavDaily
 
     with session_scope() as s:
-        # FK targets — account row is required by both CashTransaction and NavDaily.
         s.add(Account(account_id="U1", base_currency="CHF"))
         s.flush()
-        # Two deposits a year apart, terminal NAV 20 % higher than total deposits.
         s.add_all([
-            CashTransaction(
-                transaction_id="dep-1",
-                account_id="U1",
-                type="Deposits/Withdrawals",
-                amount=10_000,
-                currency="CHF",
-                fx_rate_to_base=1.0,
-                settle_date=date(2024, 1, 1),
-                event_datetime=datetime(2024, 1, 1, 12, 0, 0),
-            ),
-            CashTransaction(
-                transaction_id="dep-2",
-                account_id="U1",
-                type="Deposits/Withdrawals",
-                amount=10_000,
-                currency="CHF",
-                fx_rate_to_base=1.0,
-                settle_date=date(2025, 1, 1),
-                event_datetime=datetime(2025, 1, 1, 12, 0, 0),
-            ),
-            NavDaily(
-                snapshot_date=date(2026, 1, 1),
-                account_id="U1",
-                base_currency="CHF",
-                nav_total=24_000,
-            ),
+            _cin_flow_row(date(2024, 1, 1), dw=10_000),
+            _cin_flow_row(date(2025, 1, 1), dw=10_000),
+            NavDaily(snapshot_date=date(2026, 1, 1), account_id="U1",
+                     base_currency="CHF", nav_total=24_000),
         ])
         s.commit()
         result = xirr_summary(s)
 
-    # Two deposits totalling 20 000 grew to 24 000 → must be positive and finite.
     assert result["xirr_pct"] is not None
     assert result["xirr_pct"] > 0
     assert result["xirr_pct"] < 100  # sanity: not a runaway
+    assert result["annualised"] is True
     assert result["flow_count"] == 3  # 2 deposits + 1 terminal NAV
-    # Net of all flows must equal absolute profit (24 000 − 20 000 = 4 000).
     flow_sum = sum(f["amount"] for f in result["flows"])
-    assert abs(flow_sum - 4_000) < 0.01
+    assert abs(flow_sum - 4_000) < 0.01  # absolute profit
 
 
-def test_xirr_sub_period_uses_opening_nav():
-    """Regression: when filtering by period, XIRR must use opening NAV as the
-    initial investment — not just the explicit deposits within the period.
-
-    Before the fix, filtering YTD discarded all pre-period deposits, leaving
-    only a handful of in-period deposits + the terminal NAV. With 5k deposited
-    mid-period growing to a 150k terminal NAV from a portfolio that had been
-    invested for years, pyxirr computed millions of percent. The fix synthesises
-    the opening NAV at period.start as a negative flow so the rate is realistic.
-    """
-    from datetime import date, datetime
-
-    from ibkr_backend.analytics.filters import PeriodFilter
+def test_xirr_counts_asset_transfers_as_contributions():
+    """In-kind transfers are flows, not profit (B02): 10 000 in cash + 10 000
+    of securities transferred in, ending at 20 000 → ~0 % money-weighted."""
     from ibkr_backend.analytics.xirr import xirr_summary
-    from ibkr_backend.db.models import Account, CashTransaction, NavDaily
+    from ibkr_backend.db.models import Account, NavDaily
 
     with session_scope() as s:
         s.add(Account(account_id="U1", base_currency="CHF"))
         s.flush()
-        # Historical state: NAV 100 000 at end of 2025 (built up from many
-        # untracked pre-period deposits over years).
         s.add_all([
-            NavDaily(
-                snapshot_date=date(2025, 12, 31),
-                account_id="U1",
-                base_currency="CHF",
-                nav_total=100_000,
-            ),
-            # In-period deposits during 2026.
-            CashTransaction(
-                transaction_id="dep-1",
-                account_id="U1",
-                type="Deposits/Withdrawals",
-                amount=5_000,
-                currency="CHF",
-                fx_rate_to_base=1.0,
-                settle_date=date(2026, 2, 1),
-                event_datetime=datetime(2026, 2, 1, 12, 0, 0),
-            ),
-            # Terminal NAV grew to 120 000 by mid-2026.
-            NavDaily(
-                snapshot_date=date(2026, 6, 1),
-                account_id="U1",
-                base_currency="CHF",
-                nav_total=120_000,
-            ),
+            _cin_flow_row(date(2024, 1, 1), dw=10_000),
+            _cin_flow_row(date(2024, 6, 1), at=10_000),
+            NavDaily(snapshot_date=date(2025, 6, 1), account_id="U1",
+                     base_currency="CHF", nav_total=20_000),
         ])
         s.commit()
+        result = xirr_summary(s)
 
-        # YTD-like period: 2026-01-01 onwards.
+    assert result["xirr_pct"] == pytest.approx(0.0, abs=0.01)
+
+
+def test_xirr_sub_period_uses_opening_nav():
+    """When filtering by period, XIRR must use opening NAV as the initial
+    investment — not just the explicit flows within the period. A window
+    shorter than 365 days is NOT annualised (xirr_pct null, GIPS), but the
+    flow construction is still reported."""
+    from ibkr_backend.analytics.filters import PeriodFilter
+    from ibkr_backend.analytics.xirr import xirr_summary
+    from ibkr_backend.db.models import Account, NavDaily
+
+    with session_scope() as s:
+        s.add(Account(account_id="U1", base_currency="CHF"))
+        s.flush()
+        s.add_all([
+            NavDaily(snapshot_date=date(2025, 12, 31), account_id="U1",
+                     base_currency="CHF", nav_total=100_000),
+            _cin_flow_row(date(2026, 2, 1), dw=5_000),
+            NavDaily(snapshot_date=date(2026, 6, 1), account_id="U1",
+                     base_currency="CHF", nav_total=120_000),
+        ])
+        s.commit()
         period = PeriodFilter(start=date(2026, 1, 1), end=None, label="ytd")
         result = xirr_summary(s, period=period)
 
-    # The portfolio invested ~105k (100k carried over + 5k new) and ended at
-    # 120k after ~5 months. Annualised that's roughly 30–40 %, definitely
-    # not 1 000 000 % nor negative.
-    assert result["xirr_pct"] is not None, result.get("error")
-    assert -100 < result["xirr_pct"] < 200, f"xirr={result['xirr_pct']} suggests the opening-NAV synthesis is missing"
-    # 3 flows expected: synthesised opening NAV at period.start + 1 deposit + terminal NAV.
+    assert result["annualised"] is False
+    assert result["xirr_pct"] is None
+    # 3 flows: synthesised opening NAV at period.start + 1 deposit + terminal NAV.
     assert result["flow_count"] == 3
-    # First flow must be the negative opening NAV at period.start.
     first = result["flows"][0]
     assert first["date"] == "2026-01-01"
     assert first["amount"] == -100_000
+
+
+def test_xirr_sub_period_over_a_year_uses_opening_nav():
+    from ibkr_backend.analytics.filters import PeriodFilter
+    from ibkr_backend.analytics.xirr import xirr_summary
+    from ibkr_backend.db.models import Account, NavDaily
+
+    with session_scope() as s:
+        s.add(Account(account_id="U1", base_currency="CHF"))
+        s.flush()
+        s.add_all([
+            NavDaily(snapshot_date=date(2024, 12, 31), account_id="U1",
+                     base_currency="CHF", nav_total=100_000),
+            NavDaily(snapshot_date=date(2026, 2, 1), account_id="U1",
+                     base_currency="CHF", nav_total=121_000),
+        ])
+        s.commit()
+        period = PeriodFilter(start=date(2025, 1, 1), end=None, label="1y+")
+        result = xirr_summary(s, period=period)
+
+    assert result["annualised"] is True
+    assert result["xirr_pct"] is not None
+    assert 10 < result["xirr_pct"] < 25
 
 
 def test_dividends_by_country_falls_back_to_isin_in_description():

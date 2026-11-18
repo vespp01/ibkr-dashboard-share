@@ -93,7 +93,7 @@ def _live_quotes(rules: list[AlertRule]) -> dict[str, float | None]:
 
     contracts = [(r.symbol, r.exchange, r.currency) for r in rules]
     try:
-        with LiveClient() as live:
+        with LiveClient(purpose="price_alerts") as live:
             quotes = live.snapshot_quotes(contracts)
     except LiveUnavailable as e:
         log.info("Price alerts skipped — live quotes unavailable: %s", e)
@@ -130,10 +130,14 @@ def check_price_alerts(
         state.last_price = last
 
         if is_crossed and not state.triggered:
-            state.triggered = True
+            # Arm only after Telegram accepted the message: a failed or not-ok
+            # send leaves the rule un-triggered, so the next poll retries it
+            # (before, `triggered=True` was set first and a failed send lost the
+            # alert until the price crossed back).
             if telegram.is_configured(s):
                 try:
                     if telegram.send_message(_format(rule, last), settings=s):
+                        state.triggered = True
                         fired.append(rule.key)
                 except Exception as e:  # noqa: BLE001
                     log.warning("Price alert '%s' send failed: %s", rule.key, e)

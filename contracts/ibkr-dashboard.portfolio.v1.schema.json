@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.local/ibkr-dashboard.portfolio.v1.schema.json",
+  "title": "IBKR Dashboard portfolio context v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "producer",
+    "generated_at",
+    "as_of",
+    "status",
+    "days_stale",
+    "base_currency",
+    "summary",
+    "positions",
+    "warnings"
+  ],
+  "properties": {
+    "schema_version": { "const": "ibkr-dashboard.portfolio.v1" },
+    "producer": { "const": "IBKR_Dashboard" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "as_of": { "type": ["string", "null"], "format": "date" },
+    "status": { "enum": ["ready", "stale", "blocked"] },
+    "days_stale": { "type": ["integer", "null"], "minimum": 0 },
+    "base_currency": {
+      "type": ["string", "null"],
+      "pattern": "^[A-Z]{3}$"
+    },
+    "summary": { "$ref": "#/$defs/summary" },
+    "positions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/position" }
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[A-Z0-9_]+$" },
+      "uniqueItems": true
+    }
+  },
+  "$defs": {
+    "decimalString": {
+      "type": "string",
+      "pattern": "^-?[0-9]+(?:\\.[0-9]+)?$"
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accounts_aggregated",
+        "position_count",
+        "nav_base",
+        "gross_market_value_base",
+        "net_market_value_base"
+      ],
+      "properties": {
+        "accounts_aggregated": { "type": "integer", "minimum": 0 },
+        "position_count": { "type": "integer", "minimum": 0 },
+        "nav_base": {
+          "anyOf": [
+            { "$ref": "#/$defs/decimalString" },
+            { "type": "null" }
+          ]
+        },
+        "gross_market_value_base": { "$ref": "#/$defs/decimalString" },
+        "net_market_value_base": { "$ref": "#/$defs/decimalString" }
+      }
+    },
+    "position": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "conid",
+        "symbol",
+        "isin",
+        "asset_class",
+        "currency",
+        "quantity",
+        "market_value_base",
+        "weight_pct"
+      ],
+      "properties": {
+        "conid": { "type": "integer", "minimum": 1 },
+        "symbol": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "isin": {
+          "type": ["string", "null"],
+          "pattern": "^[A-Z]{2}[A-Z0-9]{9}[0-9]$"
+        },
+        "asset_class": { "type": "string", "minLength": 1, "maxLength": 16 },
+        "currency": {
+          "type": ["string", "null"],
+          "pattern": "^[A-Z]{3}$"
+        },
+        "quantity": { "$ref": "#/$defs/decimalString" },
+        "market_value_base": { "$ref": "#/$defs/decimalString" },
+        "weight_pct": {
+          "anyOf": [
+            { "$ref": "#/$defs/decimalString" },
+            { "type": "null" }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,7 @@
+# Test-only dependencies (kept out of the runtime image).
+# Install with: pip install -r requirements-dev.txt   (also pulls the backend set)
+-r requirements-backend.txt
+
+pytest>=9.1.1,<10
+pytest-asyncio>=1.4.0,<2
+jsonschema>=4.22,<5

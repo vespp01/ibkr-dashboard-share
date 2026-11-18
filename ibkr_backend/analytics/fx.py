@@ -1,9 +1,18 @@
-"""FX rate helper — historical spot rates via Frankfurter.app (ECB data, free, no auth).
+"""FX rate helpers.
+
+Primary source (2026-10): the IBKR `fx_rates` table (`<ccy> → CHF` per report
+date, loaded from the same Flex statement as the NAV), via `fx_lookup`. It
+shares dates and valuation conventions with NAV, so display-currency returns
+need no external call.
+
+Fallback: historical spot rates via Frankfurter.app (ECB data, free, no auth),
+used ONLY when `fx_rates` has no series for a currency, and always flagged
+(`fx_degraded`). `get_fx_rate` / `get_fx_rates` keep their legacy contract
+(1.0 on failure) for old callers; `fx_lookup` never invents a rate — dates
+without a rate come back missing so callers can null the converted figure.
 
 Rates are cached in-memory; historical rates are immutable so the cache never
-needs invalidation. If the API is unreachable, returns 1.0 so callers degrade
-gracefully (TWR stays in the original currency) — but failures are never
-written to the cache, so the next call retries the fetch.
+needs invalidation. Failures are never written to the cache.
 """
 
 from __future__ import annotations
@@ -11,7 +20,12 @@ from __future__ import annotations
 import json
 import logging
 import urllib.request
+from bisect import bisect_right
 from datetime import date
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 log = logging.getLogger(__name__)
 
@@ -115,3 +129,92 @@ def get_fx_rates(on_dates: list[date], from_ccy: str, to_ccy: str) -> dict[date,
         d: _cache.get((d.isoformat(), from_ccy, to_ccy), 1.0)
         for d in dates
     }
+
+
+# --------------------------------------------------------------------------
+# IBKR fx_rates (primary source)
+# --------------------------------------------------------------------------
+_BASE_CCY = "CHF"
+
+
+def _ccy_to_base_series(session: Session, ccy: str) -> tuple[list[date], list[float]]:
+    """Sorted (dates, rates) of `ccy → CHF` from the `fx_rates` table."""
+    from ..db.models import FxRate
+
+    rows = session.execute(
+        select(FxRate.rate_date, FxRate.rate)
+        .where(FxRate.from_ccy == ccy, FxRate.to_ccy == _BASE_CCY)
+        .order_by(FxRate.rate_date.asc())
+    ).all()
+    return [d for d, _ in rows], [float(r) for _, r in rows]
+
+
+def _asof(series: tuple[list[date], list[float]], d: date) -> float | None:
+    """Latest rate on/before `d`; before the first date, the first rate.
+
+    Report-date rates are dense (every NAV day), so back-filling only matters
+    for benchmark look-back windows that start before the first NAV day.
+    """
+    dates, rates = series
+    if not dates:
+        return None
+    i = bisect_right(dates, d)
+    return rates[i - 1] if i > 0 else rates[0]
+
+
+def fx_lookup(
+    session: Session,
+    on_dates: list[date],
+    from_ccy: str,
+    to_ccy: str,
+    *,
+    allow_fallback: bool = True,
+) -> dict[str, Any]:
+    """Rates `from_ccy → to_ccy` for many dates, IBKR `fx_rates` first.
+
+    Returns ``{"rates": {date: float}, "source": ..., "degraded": bool,
+    "missing": [date, ...]}``. ``source`` is ``identity`` (same currency),
+    ``ibkr_fx_rates`` or ``frankfurter`` (fallback → ``degraded`` True).
+    Dates with no rate are listed in ``missing`` and absent from ``rates``.
+    """
+    from_ccy = from_ccy.upper()
+    to_ccy = to_ccy.upper()
+    dates = sorted(set(on_dates))
+    if from_ccy == to_ccy:
+        return {"rates": {d: 1.0 for d in dates}, "source": "identity",
+                "degraded": False, "missing": []}
+
+    def to_base(ccy: str):
+        if ccy == _BASE_CCY:
+            return None  # identity marker
+        return _ccy_to_base_series(session, ccy)
+
+    legs = {c: to_base(c) for c in (from_ccy, to_ccy)}
+    have_db = all(s is None or s[0] for s in legs.values())
+    rates: dict[date, float] = {}
+    missing: list[date] = []
+    if have_db:
+        for d in dates:
+            num = 1.0 if legs[from_ccy] is None else _asof(legs[from_ccy], d)
+            den = 1.0 if legs[to_ccy] is None else _asof(legs[to_ccy], d)
+            if num is None or not den:
+                missing.append(d)
+            else:
+                rates[d] = num / den
+        return {"rates": rates, "source": "ibkr_fx_rates",
+                "degraded": False, "missing": missing}
+
+    if not allow_fallback:
+        return {"rates": {}, "source": "none", "degraded": True,
+                "missing": list(dates)}
+
+    # Fallback: Frankfurter, real rates only (never 1.0 by default).
+    get_fx_rates(dates, from_ccy, to_ccy)
+    for d in dates:
+        r = _cache.get((d.isoformat(), from_ccy, to_ccy))
+        if r is None:
+            missing.append(d)
+        else:
+            rates[d] = r
+    return {"rates": rates, "source": "frankfurter", "degraded": True,
+            "missing": missing}

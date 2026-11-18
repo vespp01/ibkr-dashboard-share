@@ -1,0 +1,76 @@
+{
+  "schema_version": "tax_sale_scenarios.v1",
+  "scenario_set_id": "scenario_set_synthetic_001",
+  "generated_at": "2026-08-01T10:05:00Z",
+  "snapshot_id": "snap_synthetic_cross_broker_001",
+  "snapshot_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "tax_profile": {
+    "jurisdiction": "ES",
+    "tax_year": 2026,
+    "residency_status": "unconfirmed",
+    "regime": "standard_research_only",
+    "region": "synthetic_unspecified"
+  },
+  "rule_pack": {
+    "id": "es_standard_research",
+    "version": "2026.0-draft",
+    "review_status": "draft",
+    "content_hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  },
+  "candidate_set": {
+    "candidate_set_id": "candidate_set_synthetic_001",
+    "generated_at": "2026-08-01T10:00:00Z",
+    "candidates": [
+      {
+        "candidate_id": "candidate_mt_exit_alpha",
+        "instrument_id": "instrument_synthetic_alpha",
+        "selection_source": "metodo_tendencia_exit",
+        "source_ref": "signal_synthetic_2026w31_alpha",
+        "selected_at": "2026-08-01T09:55:00Z",
+        "signal_kind": "exit_mp"
+      },
+      {
+        "candidate_id": "candidate_manual_beta",
+        "instrument_id": "instrument_synthetic_beta",
+        "selection_source": "manual",
+        "source_ref": "manual_intent_synthetic_beta",
+        "selected_at": "2026-08-01T09:50:00Z",
+        "signal_kind": null
+      }
+    ]
+  },
+  "status": "blocked",
+  "scenarios": [
+    {
+      "scenario_id": "scenario_sell_six_synthetic",
+      "status": "blocked",
+      "objective": "Demostrar que FIFO global consume la compra más antigua del otro broker",
+      "sales": [
+        {
+          "candidate_id": "candidate_mt_exit_alpha",
+          "instrument_id": "instrument_synthetic_alpha",
+          "quantity": "6",
+          "assumed_sale_date": "2026-09-15",
+          "assumed_price": "90.00",
+          "currency": "EUR",
+          "fifo_allocations": [
+            {"acquisition_event_id": "event_buy_oldest", "quantity": "6"}
+          ],
+          "estimated_gain_loss_eur": "-61.20",
+          "deferred_loss_eur": "0.00"
+        }
+      ],
+      "summary": {
+        "estimated_proceeds_eur": "538.80",
+        "estimated_gain_loss_eur": "-61.20",
+        "estimated_tax_delta_eur": "0.00",
+        "estimated_transaction_cost_eur": "1.20",
+        "portfolio_deviation_score": "0.40"
+      },
+      "warnings": ["Ejemplo sintético; los importes no constituyen un cálculo fiscal validado."],
+      "blockers": ["Residencia no confirmada.", "Paquete de reglas en borrador."]
+    }
+  ],
+  "warnings": ["Contrato de demostración sin uso financiero real."],
+  "blockers": ["No existe paquete fiscal aprobado para 2026."]
+}

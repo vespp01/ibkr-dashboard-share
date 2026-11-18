@@ -6,6 +6,7 @@ from fastapi import APIRouter, Query
 
 from ...analytics import executions_list, trades_list
 from ..deps import PeriodDep, SessionDep
+from ..payload import ACCOUNT_KEYS, strip_keys
 
 router = APIRouter()
 
@@ -17,20 +18,22 @@ def list_trades(
     account_id: str | None = Query(None),
     symbol: str | None = Query(None),
     asset_class: str | None = Query(None),
+    strategy: str | None = Query(None, description="Exact strategy label, filtered before paging"),
     status: str = Query("all", pattern="^(all|open|closed)$"),
     limit: int = Query(200, ge=1, le=1000),
     offset: int = Query(0, ge=0),
 ):
-    return trades_list(
+    return strip_keys(trades_list(
         session,
         period=period,
         account_id=account_id,
         symbol=symbol,
         asset_class=asset_class,
+        strategy=strategy,
         status=status,
         limit=limit,
         offset=offset,
-    )
+    ), ACCOUNT_KEYS)
 
 
 @router.get(
@@ -50,7 +53,7 @@ def list_executions(
     limit: int = Query(200, ge=1, le=1000),
     offset: int = Query(0, ge=0),
 ):
-    return executions_list(
+    return strip_keys(executions_list(
         session,
         period=period,
         account_id=account_id,
@@ -60,4 +63,4 @@ def list_executions(
         multi_fill_only=multi_fill_only,
         limit=limit,
         offset=offset,
-    )
+    ), ACCOUNT_KEYS)

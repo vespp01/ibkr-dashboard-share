@@ -1,17 +1,18 @@
-"""Cashflow-only nav_daily rows (nav_total NULL) must not corrupt analytics.
+"""Cash-flow-only `nav_daily` rows (nav_total NULL) must not corrupt analytics.
 
-`_refresh_external_cashflows` books deposits on their SETTLE date even when
-that date has no EquitySummary row (settle T+1 past statement end, holiday,
-pre-coverage history) — creating rows with nav_total NULL and a nonzero
-external_cashflow. Regressions covered here:
+History: `_refresh_external_cashflows` used to book deposits on their SETTLE
+date even when that date had no EquitySummary row (weekend, T+1 past statement
+end), creating rows with nav_total NULL. Since 2026-10 (B50, B01):
 
-  - TWR must carry such a cashflow to the next day WITH a NAV instead of
-    dropping it (otherwise the NAV jump is booked as performance).
-  - XIRR and portfolio_overview must pick the latest NAV with
-    `nav_total IS NOT NULL`, not the phantom row.
-  - The per-statement refresh and the full-history reconcile must derive the
-    SAME external_cashflow (settle-date only, fx required) so a daily pull
-    never re-introduces values that `reconcile-cashflows` corrected.
+  - the loader NEVER inserts such rows any more (it only mirrors flows onto
+    existing NAV days; `drop-navless-nav-rows` removes old residue);
+  - analytics read flows and returns from ChangeInNAV, not from
+    `nav_daily.external_cashflow`, so a stray NAV-less row can no longer book a
+    NAV jump as performance;
+  - XIRR, the all-time return and portfolio_overview still pick the latest NAV
+    with `nav_total IS NOT NULL`, never a stray row;
+  - the per-statement refresh and the full-history reconcile derive the SAME
+    external_cashflow (settle-date only, fx required).
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ from ibkr_backend.analytics import (
 from ibkr_backend.analytics.filters import PeriodFilter
 from ibkr_backend.analytics.xirr import xirr_summary
 from ibkr_backend.db import session_scope
-from ibkr_backend.db.models import Account, CashTransaction, NavDaily
+from ibkr_backend.db.models import Account, ChangeInNavDaily, NavDaily
 from ibkr_backend.flex.parser import parse_flex_xml
 from ibkr_backend.loaders.pipeline import load_statement, reconcile_external_cashflows
 
@@ -53,13 +54,11 @@ def _flex(body: str, *, account: str = "U42") -> bytes:
 </FlexQueryResponse>""".encode()
 
 
-# ---------------------------------------------------------------- B1 — TWR
+# ------------------------------------------- loader never creates NAV-less rows
 
-def test_twr_carries_cashflow_from_navless_day_to_next_nav_day():
-    """End-to-end repro: statement 1 has NAV for day 1 and a deposit settling
-    on day 2 (no NAV row → phantom row). Statement 2 brings NAV for day 3 only
-    (day 2 stays NAV-less). The 10 000 deposit must NOT be booked as return:
-    r_3 = (110000 - 100000 - 10000) / (100000 + 0.5*10000) = 0.
+def test_loader_does_not_create_navless_rows():
+    """Statement 1: NAV for day 1 and a deposit settling on day 2 (no NAV row).
+    The old loader created a phantom nav_daily row for day 2; now it must not.
     """
     stmt1 = _flex("""
    <EquitySummaryByReportDateInBase>
@@ -71,46 +70,33 @@ def test_twr_carries_cashflow_from_navless_day_to_next_nav_day():
         dateTime="20250602" settleDate="20250603" description="Deposit settling T+1" />
    </CashTransactions>
 """)
-    stmt2 = _flex("""
-   <EquitySummaryByReportDateInBase>
-     <EquitySummaryByReportDateInBase accountId="U42" reportDate="20250604" currency="CHF" total="110000" cash="110000" stock="0" />
-   </EquitySummaryByReportDateInBase>
-""")
     _seed_xml(stmt1)
-    _seed_xml(stmt2)
 
     with session_scope() as s:
-        # Precondition: the phantom row exists (nav_total NULL, cashflow set).
-        phantom = s.get(NavDaily, (date(2025, 6, 3), "U42"))
-        assert phantom is not None
-        assert phantom.nav_total is None
-        assert phantom.external_cashflow == Decimal("10000")
-
-        out = twr_series(s, account_id="U42")
-
-    # Phantom day is skipped from the series but its cashflow is carried.
-    assert [p["date"] for p in out["series"]] == ["2025-06-02", "2025-06-04"]
-    assert out["series"][-1]["cashflow"] == pytest.approx(10000.0)
-    assert out["series"][-1]["daily_return_pct"] == pytest.approx(0.0, abs=1e-9)
-    assert out["raw_twr_pct"] == pytest.approx(0.0, abs=1e-9)
+        assert s.get(NavDaily, (date(2025, 6, 3), "U42")) is None
+        assert s.get(NavDaily, (date(2025, 6, 2), "U42")).nav_total == Decimal("100000")
 
 
-def test_twr_without_carry_would_show_phantom_gain():
-    """Sanity companion: same NAVs with the deposit correctly attached to the
-    NAV day yield 0 % — only a *dropped* cashflow fakes the +10 %."""
+def test_twr_ignores_stray_navless_rows():
+    """A NAV-less nav_daily row (old residue) cannot change the TWR: the chain
+    is built from ChangeInNAV only."""
     with session_scope() as s:
         s.add(Account(account_id="U1", base_currency="CHF"))
         s.flush()
         s.add_all([
             NavDaily(snapshot_date=date(2025, 6, 2), account_id="U1",
-                     base_currency="CHF", nav_total=Decimal("100000"),
-                     external_cashflow=Decimal("0")),
+                     base_currency="CHF", nav_total=Decimal("100000")),
             NavDaily(snapshot_date=date(2025, 6, 3), account_id="U1",
                      base_currency="CHF", nav_total=None,
                      external_cashflow=Decimal("10000")),
             NavDaily(snapshot_date=date(2025, 6, 4), account_id="U1",
-                     base_currency="CHF", nav_total=Decimal("110000"),
-                     external_cashflow=Decimal("0")),
+                     base_currency="CHF", nav_total=Decimal("110000")),
+            # Deposit of 10 000 booked on the NAV date: IBKR twr is 0 that day.
+            ChangeInNavDaily(snapshot_date=date(2025, 6, 4), account_id="U1",
+                             currency="CHF", starting_value=Decimal("100000"),
+                             ending_value=Decimal("110000"),
+                             deposits_withdrawals=Decimal("10000"),
+                             twr=Decimal("0")),
         ])
         s.commit()
         out = twr_series(s, account_id="U1")
@@ -127,13 +113,9 @@ def test_xirr_terminal_nav_skips_cashflow_only_row():
         s.add(Account(account_id="U1", base_currency="CHF"))
         s.flush()
         s.add_all([
-            CashTransaction(
-                transaction_id="dep-1", account_id="U1",
-                type="Deposits/Withdrawals", amount=Decimal("10000"),
-                currency="CHF", fx_rate_to_base=Decimal("1"),
-                settle_date=date(2024, 1, 1),
-                event_datetime=datetime(2024, 1, 1, 12, 0),
-            ),
+            ChangeInNavDaily(snapshot_date=date(2024, 1, 1), account_id="U1",
+                             currency="CHF", deposits_withdrawals=Decimal("10000"),
+                             twr=Decimal("0")),
             NavDaily(snapshot_date=date(2025, 1, 1), account_id="U1",
                      base_currency="CHF", nav_total=Decimal("12000")),
             # Phantom row newer than the last real NAV.
@@ -157,20 +139,20 @@ def test_xirr_opening_nav_skips_cashflow_only_row():
         s.add(Account(account_id="U1", base_currency="CHF"))
         s.flush()
         s.add_all([
-            NavDaily(snapshot_date=date(2025, 12, 30), account_id="U1",
+            NavDaily(snapshot_date=date(2024, 12, 30), account_id="U1",
                      base_currency="CHF", nav_total=Decimal("100000")),
             # Phantom row between the real opening NAV and period.start.
-            NavDaily(snapshot_date=date(2025, 12, 31), account_id="U1",
+            NavDaily(snapshot_date=date(2024, 12, 31), account_id="U1",
                      base_currency="CHF", nav_total=None,
                      external_cashflow=Decimal("5000")),
-            NavDaily(snapshot_date=date(2026, 6, 1), account_id="U1",
+            NavDaily(snapshot_date=date(2026, 2, 1), account_id="U1",
                      base_currency="CHF", nav_total=Decimal("120000")),
         ])
         s.commit()
-        period = PeriodFilter(start=date(2026, 1, 1), end=None, label="ytd")
+        period = PeriodFilter(start=date(2025, 1, 1), end=None, label="1y+")
         result = xirr_summary(s, account_id="U1", period=period)
 
-    assert result["flows"][0] == {"date": "2026-01-01", "amount": -100000.0}
+    assert result["flows"][0] == {"date": "2025-01-01", "amount": -100000.0}
     assert result.get("note") is None
     assert result["xirr_pct"] is not None
     assert -100 < result["xirr_pct"] < 200
@@ -193,7 +175,6 @@ def test_portfolio_overview_nav_skips_cashflow_only_row():
         out = portfolio_overview(s, account_id="U1")
 
     assert out["nav_base"] == 50000.0
-    assert out["nav_date"] == "2026-06-01"
     assert out["freshness"]["nav_as_of"] == "2026-06-01"
 
 
@@ -278,7 +259,8 @@ def test_reconcile_matches_refresh_after_repeated_pull():
 
 def test_total_return_on_cash_skips_cashflow_only_row():
     """A deposit settling after the last real NAV must not zero current_nav
-    (which would report absolute_profit = -net_deposits)."""
+    (which would report absolute_profit = -net_deposits). Net deposits come
+    from ChangeInNAV flows (cash + in-kind)."""
     with session_scope() as s:
         s.add(Account(account_id="U1", base_currency="CHF"))
         s.flush()
@@ -288,18 +270,17 @@ def test_total_return_on_cash_skips_cashflow_only_row():
             NavDaily(snapshot_date=date(2026, 6, 3), account_id="U1",
                      base_currency="CHF", nav_total=None,
                      external_cashflow=Decimal("10000")),
-            CashTransaction(transaction_id="CFX1", account_id="U1",
-                            type="Deposits/Withdrawals",
-                            amount=Decimal("50000"), currency="CHF",
-                            fx_rate_to_base=Decimal("1"),
-                            event_datetime=datetime(2026, 6, 2, 0, 0),
-                            settle_date=date(2026, 6, 3)),
+            ChangeInNavDaily(snapshot_date=date(2026, 5, 1), account_id="U1",
+                             currency="CHF", deposits_withdrawals=Decimal("40000"),
+                             asset_transfers=Decimal("10000"), twr=Decimal("0")),
         ])
         s.commit()
         out = total_return_on_cash(s, account_id="U1")
 
     assert out["current_nav_base"] == 60000.0
+    assert out["cumulative_net_deposits_base"] == pytest.approx(50000.0)
     assert out["absolute_profit_base"] == pytest.approx(10000.0)
+    assert "cagr_pct" not in out
 
 
 def test_margin_summary_skips_cashflow_only_row():

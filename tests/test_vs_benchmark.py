@@ -168,7 +168,16 @@ def test_vs_benchmark_happy_path(monkeypatch):
 
 
 def test_vs_benchmark_excess_return(monkeypatch):
-    """level_comparison.excess_return_pct == portfolio_return_pct - benchmark_return_pct."""
+    """Pinned portfolio, benchmark and excess returns over the dense run.
+
+    Dense seed: 40 daily rows from 2026-01-05 at twr = +0.12 % (CHF), base date
+    2026-01-04. Portfolio = 1.0012^40 - 1: ln(1.0012) = 0.00119928058,
+    x 40 = 0.04797122, exp = 1.04914038 -> 4.914046 %.
+    Synthetic S&P: +0.05 %/calendar day at flat FX, so over the same 40 days
+    1.0005^40 = exp(40 * 0.00049987504) = exp(0.01999500) = 1.02019624
+    -> 2.019624 %.
+    Excess = 4.914046 - 2.019624 = 2.894422 pp.
+    """
     monkeypatch.setattr(
         "ibkr_backend.benchmarks.sp500.fetch_sp500_in_currency",
         _synthetic_sp500,
@@ -186,11 +195,12 @@ def test_vs_benchmark_excess_return(monkeypatch):
         )
 
     lc = result["level_comparison"]
-    expected_excess = lc["portfolio_return_pct"] - lc["benchmark_return_pct"]
-    assert abs(lc["excess_return_pct"] - expected_excess) < 1e-6, (
-        f"excess_return_pct {lc['excess_return_pct']} != "
-        f"portfolio {lc['portfolio_return_pct']} - benchmark {lc['benchmark_return_pct']}"
-    )
+    assert lc["portfolio_return_pct"] == pytest.approx(4.914046, abs=1e-5)
+    assert lc["benchmark_return_pct"] == pytest.approx(2.019624, abs=1e-5)
+    assert lc["excess_return_pct"] == pytest.approx(2.894422, abs=1e-5)
+    # The charted end points agree with the headline figures (rebased to 100).
+    assert result["points"][-1]["portfolio"] == pytest.approx(104.9140, abs=1e-4)
+    assert result["points"][-1]["benchmark"] == pytest.approx(102.0196, abs=1e-4)
 
 
 def test_vs_benchmark_resolution_fields(monkeypatch):
@@ -219,16 +229,18 @@ def test_vs_benchmark_resolution_fields(monkeypatch):
 
 
 def test_vs_benchmark_guard_blocks_gappy_series(monkeypatch):
-    """Honesty guard: a NAV series with year-end gaps (the residual-cashflow
-    failure mode) must return is_reliable=False instead of a misleading level
-    comparison — mirrors twr_series' own quality flag.
+    """Honesty guard: a daily-TWR series with a huge hole must return
+    is_reliable=False instead of a misleading level comparison — mirrors
+    twr_series' own quality flag.
     """
     monkeypatch.setattr(
         "ibkr_backend.benchmarks.sp500.fetch_sp500_in_currency",
         _synthetic_sp500,
     )
 
-    _seed_data_full()  # 2 year-end snapshots + dense run → max_gap ~370 days
+    _seed_data_full()  # 2 year-end NAVs + dense CIN run
+    with session_scope() as s:
+        s.add(_change(date(2024, 12, 31), twr_pct=0.1))  # ~370-day gap before 2026
 
     with session_scope() as session:
         result = vs_benchmark(
@@ -318,7 +330,9 @@ def test_vs_benchmark_dense_only_segment(monkeypatch):
 
     assert result["is_reliable"] is True
     pts = result["points"]
-    assert len(pts) == 35
+    # 35 paired days + the base point (the day before the window, index 100).
+    assert len(pts) == 36
+    assert pts[0]["date"] == (dense_start - timedelta(days=1)).isoformat()
 
     first = pts[0]
     assert abs(first["portfolio"] - 100.0) < 1e-6
@@ -344,10 +358,10 @@ def test_vs_benchmark_benchmark_fetch_failure(monkeypatch):
         _failing_fetch,
     )
 
-    # Seed a couple of NavDaily rows so twr_series returns ≥ 2 points.
+    # Seed a couple of ChangeInNAV rows so the TWR series exists.
     with session_scope() as s:
-        s.add(_nav(date(2026, 1, 5), nav=50_000.0))
-        s.add(_nav(date(2026, 1, 6), nav=50_200.0))
+        s.add(_change(date(2026, 1, 5), twr_pct=0.1))
+        s.add(_change(date(2026, 1, 6), twr_pct=0.2))
 
     with session_scope() as session:
         result = vs_benchmark(

@@ -13,6 +13,7 @@ os.environ.setdefault("DATABASE_URL", "sqlite:///./.test.db")
 os.environ.setdefault("IB_FLEX_TOKEN", "")
 os.environ.setdefault("IB_FLEX_QUERY_ID", "")
 os.environ.setdefault("ENABLE_LIVE_OVERLAY", "false")
+os.environ.setdefault("TAX_SCENARIOS_FILE", "")
 
 
 @pytest.fixture(autouse=True)

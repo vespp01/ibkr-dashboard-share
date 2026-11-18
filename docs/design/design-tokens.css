@@ -30,7 +30,7 @@
   --fg-strong:      #fafafa; /* primary text */
   --fg-default:     #e0e0ea; /* body / section header text */
   --fg-muted:       #8b88a6; /* metric labels, missing-data body (violet-grey) */
-  --fg-subtle:      #5d5b73; /* footer, captions */
+  --fg-subtle:      #7d7a96; /* footer, captions — ≥4.5:1 on surfaces (was #5d5b73) */
   --fg-on-color:    #ffffff; /* text inside colored swatches */
 
   /* ---------- Brand / Primary (violet) ---------- */

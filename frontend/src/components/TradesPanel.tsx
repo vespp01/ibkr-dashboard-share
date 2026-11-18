@@ -1,7 +1,8 @@
-import { useQuery } from '@tanstack/react-query';
-import { useMemo, useState } from 'react';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
+import { useEffect, useMemo, useState } from 'react';
 import { api, type PeriodFilters } from '../lib/api';
 import { ExecutionsPanel } from './ExecutionsPanel';
+import { formatCurrency } from '../lib/format';
 import { useI18n } from '../lib/i18n';
 
 type Status = 'all' | 'open' | 'closed';
@@ -21,7 +22,7 @@ const COPY = {
     open: 'Open',
     closed: 'Closed',
     symbolTitle: 'Filtro exacto en servidor (todas las páginas). Las sugerencias salen de la página cargada; puedes escribir cualquier símbolo.',
-    strategyTitle: 'Opciones derivadas de la página cargada; filtra solo las filas visibles',
+    strategyTitle: 'Filtro de estrategia en el servidor (todas las páginas)',
     win: 'win',
     loss: 'loss',
     loading: 'Cargando...',
@@ -34,7 +35,7 @@ const COPY = {
     price: 'Precio',
     commission: 'Comisión',
     retainedDividends: 'Div. retenidos',
-    retainedTitle: 'Dividendos cobrados desde el primer BUY del símbolo hasta este trade; aprox. La atribución por lote requiere FIFO parsing.',
+    retainedTitle: 'Solo en operaciones de cierre: dividendos cobrados desde el cierre anterior del símbolo (o su primer BUY) hasta este cierre. Aprox.; la atribución por lote requiere FIFO parsing.',
     totalReturnTitle: 'P&L + dividendos cobrados durante el holding',
     status: 'Estado',
     openBadge: 'Abierta',
@@ -44,7 +45,8 @@ const COPY = {
     next: 'Siguiente',
     of: 'de',
     operations: 'operaciones',
-    strategyPageFilter: 'filtro Strategy aplicado solo a la página visible',
+    openTrades: 'abiertas',
+    closedTrades: 'cerradas',
   },
   en: {
     trades: 'Trades',
@@ -54,7 +56,7 @@ const COPY = {
     open: 'Open',
     closed: 'Closed',
     symbolTitle: 'Exact server-side filter across all pages. Suggestions come from the loaded page; you can type any symbol.',
-    strategyTitle: 'Options from the loaded page; filters visible rows only',
+    strategyTitle: 'Server-side strategy filter (all pages)',
     win: 'win',
     loss: 'loss',
     loading: 'Loading...',
@@ -67,7 +69,7 @@ const COPY = {
     price: 'Price',
     commission: 'Commission',
     retainedDividends: 'Held divs',
-    retainedTitle: 'Dividends collected from first BUY of the symbol to this trade; approximate. Lot attribution requires FIFO parsing.',
+    retainedTitle: 'Closing trades only: dividends collected since the symbol\'s previous close (or its first BUY) up to this close. Approximate; lot attribution requires FIFO parsing.',
     totalReturnTitle: 'P&L + dividends collected during the holding period',
     status: 'Status',
     openBadge: 'Open',
@@ -77,7 +79,8 @@ const COPY = {
     next: 'Next',
     of: 'of',
     operations: 'trades',
-    strategyPageFilter: 'Strategy filter applied only to the visible page',
+    openTrades: 'open',
+    closedTrades: 'closed',
   },
   de: {
     trades: 'Trades',
@@ -87,7 +90,7 @@ const COPY = {
     open: 'Offen',
     closed: 'Geschlossen',
     symbolTitle: 'Exakter serverseitiger Filter ueber alle Seiten. Vorschlaege stammen aus der geladenen Seite; jedes Symbol kann eingegeben werden.',
-    strategyTitle: 'Optionen aus der geladenen Seite; filtert nur sichtbare Zeilen',
+    strategyTitle: 'Serverseitiger Strategie-Filter (alle Seiten)',
     win: 'Gewinn',
     loss: 'Verlust',
     loading: 'Laden...',
@@ -100,7 +103,7 @@ const COPY = {
     price: 'Preis',
     commission: 'Kommission',
     retainedDividends: 'Gehaltene Divs',
-    retainedTitle: 'Dividenden vom ersten BUY des Symbols bis zu diesem Trade; approximiert. Lot-Attribution benoetigt FIFO Parsing.',
+    retainedTitle: 'Nur bei Schluss-Trades: Dividenden seit dem vorherigen Schluss des Symbols (oder seinem ersten BUY) bis zu diesem Schluss. Approximiert; Lot-Attribution benoetigt FIFO Parsing.',
     totalReturnTitle: 'P&L + Dividenden waehrend der Haltedauer',
     status: 'Status',
     openBadge: 'Offen',
@@ -110,13 +113,14 @@ const COPY = {
     next: 'Weiter',
     of: 'von',
     operations: 'Trades',
-    strategyPageFilter: 'Strategy-Filter nur auf sichtbare Seite angewendet',
+    openTrades: 'offen',
+    closedTrades: 'geschlossen',
   },
 } as const;
 
 function fmtCurrency(v: number | undefined, ccy: string, locale: string): string {
   if (v === undefined || v === null || Number.isNaN(v)) return '—';
-  return `${ccy} ${v.toLocaleString(locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return formatCurrency(v, ccy, locale);
 }
 
 function fmtDate(iso: string | undefined): string {
@@ -135,6 +139,12 @@ export function TradesPanel({ filters, currency }: Props) {
   const [view, setView] = useState<View>('trades');
   const [status, setStatus] = useState<Status>('all');
   const [symbol, setSymbol] = useState<string>('');
+  // The ticker box refetches on every keystroke otherwise: debounce 300 ms.
+  const [debouncedSymbol, setDebouncedSymbol] = useState<string>('');
+  useEffect(() => {
+    const id = window.setTimeout(() => setDebouncedSymbol(symbol), 300);
+    return () => window.clearTimeout(id);
+  }, [symbol]);
   const [strategy, setStrategy] = useState<string>('');
   const [offset, setOffset] = useState<number>(0);
   const limit = 50;
@@ -150,14 +160,16 @@ export function TradesPanel({ filters, currency }: Props) {
   }
 
   const query = useQuery({
-    queryKey: ['trades', filtersKey, status, symbol, limit, offset],
+    queryKey: ['trades', filtersKey, status, debouncedSymbol, strategy, limit, offset],
     queryFn: () => api.trades({
       ...filters,
       status,
-      ...(symbol ? { symbol } : {}),
+      ...(debouncedSymbol ? { symbol: debouncedSymbol } : {}),
+      ...(strategy ? { strategy } : {}),
       limit,
       offset,
     }),
+    placeholderData: keepPreviousData,
   });
 
   const rows = useMemo(() => query.data?.rows ?? [], [query.data?.rows]);
@@ -173,16 +185,10 @@ export function TradesPanel({ filters, currency }: Props) {
     return Array.from(set).sort();
   }, [rows]);
 
-  const strategies = useMemo(() => {
-    const set = new Set<string>();
-    rows.forEach((r) => { if (r.strategy) set.add(r.strategy); });
-    return Array.from(set).sort();
-  }, [rows]);
-
-  const filteredRows = useMemo(() => {
-    if (!strategy) return rows;
-    return rows.filter((r) => r.strategy === strategy);
-  }, [rows, strategy]);
+  // Selectable strategies come from the server (computed before the strategy
+  // filter, so the list does not collapse once one is picked).
+  const strategies = query.data?.strategies ?? [];
+  const filteredRows = rows;
 
   if (view === 'executions') {
     return (
@@ -223,7 +229,7 @@ export function TradesPanel({ filters, currency }: Props) {
           </datalist>
           <select
             value={strategy}
-            onChange={(e) => setStrategy(e.target.value)}
+            onChange={(e) => { setStrategy(e.target.value); setOffset(0); }}
             className="trades-select"
             title={copy.strategyTitle}
           >
@@ -235,13 +241,16 @@ export function TradesPanel({ filters, currency }: Props) {
 
       {summary ? (
         <div className="trades-summary-line">
-          <strong>{summary.total}</strong> trades
+          <strong>{summary.open_count}</strong> {copy.openTrades}
           <span className="dot">·</span>
+          <strong>{summary.closed_count}</strong> {copy.closedTrades}
+          <span className="dot">(</span>
           <span className="pos"><strong>{summary.win}</strong> {copy.win}</span>
           <span className="dot">·</span>
           <span className="neg"><strong>{summary.loss}</strong> {copy.loss}</span>
           <span className="dot">·</span>
           <span className="muted"><strong>{summary.be}</strong> BE</span>
+          <span className="dot">)</span>
           <span className="dot">·</span>
           <span className={summary.realized_total_base !== undefined && summary.realized_total_base >= 0 ? 'pos' : 'neg'}>
             <strong>
@@ -346,7 +355,6 @@ export function TradesPanel({ filters, currency }: Props) {
           </button>
           <span className="trades-pagination-info">
             {rows.length > 0 ? `${offset + 1}–${offset + rows.length}` : '0'} {copy.of} {summary.total} {copy.operations}
-            {strategy ? ` · ${copy.strategyPageFilter}` : ''}
           </span>
           <button
             type="button"

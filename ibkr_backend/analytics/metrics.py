@@ -61,7 +61,6 @@ from .interest import (  # noqa: F401
     interest_summary,
 )
 from .overview import (  # noqa: F401
-    DEPOSIT_TYPES,
     cash_balances,
     change_in_nav_summary,
     change_in_nav_timeseries,
@@ -242,7 +241,10 @@ def symbol_attribution(
         symbol = (u.symbol if u else None) or (instr.symbol if instr else None) or ""
         ac = (u.asset_class if u else None) or (instr.asset_class if instr else None)
 
-        total_pnl = realized + unrealized + mtm_total
+        # FIFO realized/unrealized and MTM measure the same P&L on two bases:
+        # adding them double-counts. The headline is the MTM period total
+        # (reconciles with CIN mtm); realized/unrealized stay as breakdown.
+        total_pnl = mtm_total
         out.append({
             "account_id": acct,
             "conid": conid,

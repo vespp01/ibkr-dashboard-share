@@ -166,5 +166,106 @@ def test_poll_deadline_exceeded_raises_not_ready(clock):
         client.fetch(query_id="123456")
 
     assert exc_info.value.code is None
-    assert "not ready after 30s" in exc_info.value.message
-    assert seen["get"] == 3  # t=0, 10, 20; deadline hit at t=30
+    assert "not ready by the 30s deadline" in exc_info.value.message
+    assert "last IBKR answer: 1019" in exc_info.value.message  # keeps the code for triage
+    assert seen["get"] == 4  # t=0, 10, 20 and a last poll at the t=30 deadline
+
+
+def _make_send_client(send_responses: list[bytes], **kwargs) -> tuple[FlexClient, dict]:
+    """FlexClient whose SendRequest pops the next body (the last one repeats);
+    GetStatement always serves STATEMENT."""
+    seen = {"send": 0, "get": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/SendRequest"):
+            seen["send"] += 1
+            body = send_responses.pop(0) if len(send_responses) > 1 else send_responses[0]
+            return httpx.Response(200, content=body)
+        seen["get"] += 1
+        return httpx.Response(200, content=STATEMENT)
+
+    client = FlexClient(token="test-token", **kwargs)
+    client._http.close()
+    client._http = httpx.Client(transport=httpx.MockTransport(handler))
+    return client, seen
+
+
+def test_send_request_1004_is_resent_then_returns_statement(clock):
+    # 2026-09-18/19: the 06:30 pull failed on a SendRequest 1004 without retry.
+    incomplete = _envelope("1004", "Statement is incomplete at this time. Please try again shortly.")
+    client, seen = _make_send_client(
+        [incomplete, incomplete, SEND_OK], poll_interval_seconds=5, max_wait_seconds=300
+    )
+    with client:
+        out = client.fetch(query_id="123456")
+
+    assert out.xml == STATEMENT
+    assert out.reference_code == "9876543210"
+    assert seen == {"send": 3, "get": 1}
+    assert clock.sleeps == [5, 10]  # growing backoff between re-sends
+
+
+def test_send_request_1004_until_deadline_raises_the_flex_code(clock):
+    incomplete = _envelope("1004", "Statement is incomplete at this time. Please try again shortly.")
+    client, seen = _make_send_client([incomplete], poll_interval_seconds=5, max_wait_seconds=120)
+    with client, pytest.raises(FlexError) as exc_info:
+        client.fetch(query_id="123456")
+
+    assert exc_info.value.code == "1004"
+    assert "incomplete" in exc_info.value.message
+    assert seen["get"] == 0
+    assert seen["send"] > 1
+    assert sum(clock.sleeps) <= 120  # never waits past max_wait_seconds
+    assert max(clock.sleeps) <= client_mod.RATE_LIMIT_MAX_DELAY_SECONDS
+
+
+def test_send_request_terminal_code_is_not_resent(clock):
+    client, seen = _make_send_client(
+        [_envelope("1012", "Token has expired")], poll_interval_seconds=5, max_wait_seconds=300
+    )
+    with client, pytest.raises(FlexError) as exc_info:
+        client.fetch(query_id="123456")
+
+    assert exc_info.value.code == "1012"
+    assert seen == {"send": 1, "get": 0}
+    assert clock.sleeps == []
+
+
+def test_send_request_retries_leave_half_the_window_for_get_statement(clock):
+    # Review of PR #16: with one shared deadline, a request accepted at t=30 of a
+    # 30 s window never reached GetStatement and failed as "not ready". Re-sends
+    # now stop at half the window and raise the real IBKR code.
+    incomplete = _envelope("1004", "Statement is incomplete at this time. Please try again shortly.")
+    client, seen = _make_send_client(
+        [incomplete, incomplete, incomplete, SEND_OK], poll_interval_seconds=5, max_wait_seconds=30
+    )
+    with client, pytest.raises(FlexError) as exc_info:
+        client.fetch(query_id="123456")
+
+    assert exc_info.value.code == "1004"
+    assert seen == {"send": 3, "get": 0}
+    assert sum(clock.sleeps) <= 15  # re-sends never use more than half the window
+
+
+def test_send_request_1001_is_retryable(clock):
+    # IBKR 1001 "Statement could not be generated at this time. Please try again shortly."
+    busy = _envelope("1001", "Statement could not be generated at this time. Please try again shortly.")
+    client, seen = _make_send_client([busy, SEND_OK], poll_interval_seconds=5, max_wait_seconds=300)
+    with client:
+        out = client.fetch(query_id="123456")
+
+    assert out.xml == STATEMENT
+    assert seen == {"send": 2, "get": 1}
+
+
+def test_send_request_1018_is_not_resent_after_a_shortened_wait(clock):
+    # Review of #17: near the half-window edge a fractional sleep re-sent inside
+    # IBKR's rate limit. Re-send only after a full backoff, else raise the code.
+    limited = _envelope("1018", "Too many requests have been made from this token. Please try again shortly.")
+    client, seen = _make_send_client([limited], poll_interval_seconds=5, max_wait_seconds=60)
+    with client, pytest.raises(FlexError) as exc_info:
+        client.fetch(query_id="123456")
+
+    assert exc_info.value.code == "1018"
+    assert clock.sleeps == [5, 20]  # the next backoff (60 s) does not fit the 30 s budget
+    assert seen == {"send": 3, "get": 0}

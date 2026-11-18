@@ -79,6 +79,15 @@ def positions_snapshot(
         q = q.where(PositionEod.account_id == account_id)
     if asset_class:
         q = q.where(PositionEod.asset_class == asset_class)
+    # Weight is over total NAV (same formula as margin.py / investmentlab.py).
+    # Flex `percentOfNAV` is per asset class (sums to 100 within each), so it is
+    # exposed separately as `pct_of_asset_class`.
+    nav_q = select(func.sum(NavDaily.nav_total)).where(
+        NavDaily.snapshot_date == snapshot, NavDaily.nav_total.is_not(None)
+    )
+    if account_id:
+        nav_q = nav_q.where(NavDaily.account_id == account_id)
+    nav_total = float(session.execute(nav_q).scalar() or 0)
     out: list[dict] = []
     for p, desc, country, sector, industry in session.execute(q):
         position_value_base = (
@@ -106,7 +115,8 @@ def positions_snapshot(
             "cost_basis_price": _f(p.cost_basis_price),
             "fifo_pnl_unrealized": _f(p.fifo_pnl_unrealized),
             "fifo_pnl_unrealized_base": _f(unrealized_base),
-            "pct_of_nav": _f(p.pct_of_nav),
+            "weight": (float(position_value_base) / nav_total * 100) if nav_total else None,
+            "pct_of_asset_class": _f(p.pct_of_nav),
             "fx_rate_to_base": _f(p.fx_rate_to_base),
             "open_dt": p.open_dt.isoformat() if p.open_dt else None,
         })

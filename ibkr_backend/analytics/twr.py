@@ -1,32 +1,43 @@
-"""Time-Weighted Return — daily Modified Dietz chained.
+"""Time-Weighted Return — chained IBKR daily TWR (`change_in_nav_daily.twr`).
 
-For each day t with NAV_open, NAV_close and an external cashflow CF (deposits
-positive, withdrawals negative), the daily return is
+Canonical method (decision D2, 2026-10): the base-currency (CHF) return of day
+t is IBKR's own `ChangeInNAV.twr`, and the period TWR is its geometric chain
 
-    r_t = (NAV_close - NAV_open - CF) / (NAV_open + 0.5 * CF)
+    TWR = prod(1 + twr_t / 100) - 1.
 
-TWR over the period is then `prod(1 + r_t) - 1`. This matches IBKR's own
-PortfolioAnalyst Time-Weighted Return.
+The row dated t is the return OF day t (start-of-day value = previous row's
+ending value), so a bounded window `[start, end]` simply chains the rows in
+that range: day 1 is included, and the base is the last row strictly before
+`start` (`base_date`).
 
-External cashflows are sourced from `nav_daily.external_cashflow`, which the
-loader populates from CashTransactions of type Deposits/Withdrawals and
-Internal Transfers.
+Display currency X (EUR, USD, ...): the CHF return is converted with the IBKR
+`fx_rates` series (same report dates as NAV):
+
+    r_X,t = (1 + r_CHF,t) * (fx_t / fx_{t-1}) - 1,   fx = X per 1 CHF.
+
+Frankfurter is only a flagged fallback (`fx_degraded`); with no rate the
+converted figures are null, never silently CHF.
+
+Modified Dietz is kept ONLY as a reconciliation column. It is computed from the
+same ChangeInNAV rows, with flows = `depositsWithdrawals + assetTransfers` on
+the CIN date (see `flows.py`), and is reported next to the canonical value.
 """
 
 from __future__ import annotations
 
-from datetime import date
-from decimal import Decimal
+from datetime import date, timedelta
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..db.models import NavDaily
+from ..db.models import ChangeInNavDaily
 from .filters import PeriodFilter
-from .fx import get_fx_rates
+from .fx import fx_lookup
 
 _ACCOUNT_BASE_CURRENCY = "CHF"
+# GIPS: returns for periods shorter than one year are not annualised.
+_ANNUALISE_MIN_DAYS = 365
 
 
 def _series_quality(dates: list[date]) -> dict[str, Any]:
@@ -70,134 +81,229 @@ def _series_quality(dates: list[date]) -> dict[str, Any]:
     }
 
 
+def _f(v) -> float:
+    return float(v) if v is not None else 0.0
+
+
+def cin_rows(
+    session: Session,
+    period: PeriodFilter | None,
+    account_id: str | None,
+) -> tuple[list[ChangeInNavDaily], date | None]:
+    """ChangeInNAV rows in the window with a daily TWR, plus the base date.
+
+    The base date is the last CIN row strictly before `period.start` (the row
+    whose ending value opens the window). For an unbounded start it is the day
+    before the first row, so a benchmark anchor exists for day 1.
+    """
+    q = (
+        select(ChangeInNavDaily)
+        .where(ChangeInNavDaily.twr.is_not(None))
+        .order_by(ChangeInNavDaily.snapshot_date.asc())
+    )
+    if account_id:
+        q = q.where(ChangeInNavDaily.account_id == account_id)
+    if period and period.start:
+        q = q.where(ChangeInNavDaily.snapshot_date >= period.start)
+    if period and period.end:
+        q = q.where(ChangeInNavDaily.snapshot_date <= period.end)
+    rows = list(session.execute(q).scalars().all())
+    if not rows:
+        return [], None
+
+    base: date | None = None
+    if period and period.start:
+        bq = select(ChangeInNavDaily.snapshot_date).where(
+            ChangeInNavDaily.snapshot_date < rows[0].snapshot_date,
+            ChangeInNavDaily.twr.is_not(None),
+        ).order_by(ChangeInNavDaily.snapshot_date.desc()).limit(1)
+        if account_id:
+            bq = bq.where(ChangeInNavDaily.account_id == account_id)
+        base = session.execute(bq).scalar()
+    if base is None:
+        base = rows[0].snapshot_date - timedelta(days=1)
+    return rows, base
+
+
+def cin_daily_returns(
+    session: Session,
+    period: PeriodFilter | None,
+    account_id: str | None,
+) -> tuple[list[tuple[date, float]], date | None]:
+    """Daily base-currency returns as decimals (0.01 = 1 %) + base date."""
+    rows, base = cin_rows(session, period, account_id)
+    return [(r.snapshot_date, _f(r.twr) / 100.0) for r in rows], base
+
+
+def convert_returns(
+    session: Session,
+    returns: list[tuple[date, float]],
+    base_date: date | None,
+    display_currency: str,
+) -> dict[str, Any]:
+    """Convert CHF daily returns into `display_currency`.
+
+    `r_X = (1 + r_CHF) * fx_t / fx_{t-1} - 1`, fx = X per CHF from `fx_rates`.
+    Returns ``{"returns": [(date, r)], "fx": {date: X-per-CHF}, "fx_source",
+    "fx_degraded", "complete"}``; ``complete`` is False when any needed rate is
+    missing (the returns list is then empty — figures must be null).
+    """
+    ccy = (display_currency or _ACCOUNT_BASE_CURRENCY).upper()
+    if ccy == _ACCOUNT_BASE_CURRENCY or not returns:
+        return {"returns": list(returns), "fx": {}, "fx_source": "identity",
+                "fx_degraded": False, "complete": True}
+    dates = [d for d, _ in returns]
+    if base_date is not None:
+        dates = [base_date] + dates
+    look = fx_lookup(session, dates, _ACCOUNT_BASE_CURRENCY, ccy)
+    rates = look["rates"]
+    if look["missing"] or any(rates.get(d) in (None, 0.0) for d in dates):
+        return {"returns": [], "fx": rates, "fx_source": look["source"],
+                "fx_degraded": True, "complete": False}
+    out: list[tuple[date, float]] = []
+    prev = rates[base_date] if base_date is not None else rates[dates[0]]
+    for d, r in returns:
+        cur = rates[d]
+        out.append((d, (1 + r) * cur / prev - 1))
+        prev = cur
+    return {"returns": out, "fx": rates, "fx_source": look["source"],
+            "fx_degraded": look["degraded"], "complete": True}
+
+
+def portfolio_returns(
+    session: Session,
+    *,
+    period: PeriodFilter | None,
+    account_id: str | None,
+    display_currency: str | None,
+) -> dict[str, Any]:
+    """Daily portfolio returns in `display_currency` (shared by TWR, alpha, TE,
+    vs-benchmark so every figure on a page uses the same series and dates)."""
+    ccy = (display_currency or _ACCOUNT_BASE_CURRENCY).upper()
+    base_rets, base_date = cin_daily_returns(session, period, account_id)
+    conv = convert_returns(session, base_rets, base_date, ccy)
+    return {
+        "returns": conv["returns"],
+        "base_returns": base_rets,
+        "base_date": base_date,
+        "display_currency": ccy,
+        "fx": conv["fx"],
+        "fx_source": conv["fx_source"],
+        "fx_degraded": conv["fx_degraded"],
+        "complete": conv["complete"],
+    }
+
+
+def _dietz_daily(row: ChangeInNavDaily) -> float:
+    """Modified Dietz of one CIN day (reconciliation only)."""
+    start = _f(row.starting_value)
+    end = _f(row.ending_value)
+    cf = _f(row.deposits_withdrawals) + _f(row.asset_transfers)
+    denom = start + 0.5 * cf
+    return (end - start - cf) / denom if denom else 0.0
+
+
 def twr_series(
     session: Session,
     *,
     period: PeriodFilter | None = None,
     account_id: str | None = None,
     display_currency: str | None = None,
+    summary: bool = False,
 ) -> dict[str, Any]:
-    """Return cumulative TWR series + headline numbers.
+    """Cumulative TWR series + headline numbers (see module docstring).
 
-    When `display_currency` differs from the account base currency (CHF),
-    each NAV snapshot and cash flow is converted at the spot rate on that date
-    before running the Modified Dietz formula. This strips the CHF appreciation
-    or depreciation effect from the return.
-
-    Warm-up rows are skipped: if the very first NAV snapshots are tiny (e.g.,
-    an account-opening promo balance of < 0.5 % of the period's max NAV),
-    Modified Dietz produces meaningless "thousand-percent" daily returns from
-    the first deposit. We start the chain at the first row whose NAV exceeds
-    `max(100, 0.005 × max_nav)` in display currency, so the return curve
-    reflects performance on capital that was actually at risk.
+    `summary=True` omits the daily series (a ~2 KB payload instead of ~100 KB);
+    every headline figure is identical to the full response.
     """
-    q = select(NavDaily).order_by(NavDaily.snapshot_date.asc())
-    if account_id:
-        q = q.where(NavDaily.account_id == account_id)
-    if period and period.start:
-        q = q.where(NavDaily.snapshot_date >= period.start)
-    if period and period.end:
-        q = q.where(NavDaily.snapshot_date <= period.end)
-    rows = session.execute(q).scalars().all()
-
     target_ccy = (display_currency or _ACCOUNT_BASE_CURRENCY).upper()
-    convert = target_ccy != _ACCOUNT_BASE_CURRENCY
+    rows, base_date = cin_rows(session, period, account_id)
 
     if not rows:
-        return {
-            "series": [],
+        empty: dict[str, Any] = {
             "twr_pct": None,
             "annualised_pct": None,
             "n_days": 0,
             "display_currency": target_ccy,
-            "warmup_skipped": 0,
+            "fx_source": "identity",
+            "fx_degraded": False,
+            "source": "change_in_nav_daily.twr",
         }
-    fx_rates = (
-        get_fx_rates([row.snapshot_date for row in rows], _ACCOUNT_BASE_CURRENCY, target_ccy)
-        if convert
-        else {}
-    )
+        if not summary:
+            empty["series"] = []
+        return empty
 
-    nav_values = [
-        (float(row.nav_total) if row.nav_total is not None else 0.0)
-        * (fx_rates.get(row.snapshot_date, 1.0) if convert else 1.0)
-        for row in rows
-    ]
-    max_nav = max(nav_values) if nav_values else 0.0
-    nav_floor = max(100.0, 0.005 * max_nav)
+    base_rets = [(r.snapshot_date, _f(r.twr) / 100.0) for r in rows]
+    conv = convert_returns(session, base_rets, base_date, target_ccy)
 
-    # Find the first row whose NAV exceeds the floor; everything before is a
-    # warm-up period (account opening, small balance) that would explode the
-    # Modified Dietz formula on the first real deposit.
-    start_idx = 0
-    for i, nav in enumerate(nav_values):
-        if nav >= nav_floor:
-            start_idx = i
-            break
-    rows = rows[start_idx:]
-    warmup_skipped = start_idx
+    quality = _series_quality([r.snapshot_date for r in rows])
+    first_date, last_date = rows[0].snapshot_date, rows[-1].snapshot_date
+    n_days = (last_date - base_date).days if base_date else (last_date - first_date).days
+
+    # Reconciliation: Modified Dietz on the same rows, base currency.
+    dietz_cum = 1.0
+    chain_base = 1.0
+    for r in rows:
+        dietz_cum *= 1 + _dietz_daily(r)
+        chain_base *= 1 + _f(r.twr) / 100.0
+    reconciliation = {
+        "dietz_twr_pct": (dietz_cum - 1) * 100,
+        "canonical_base_twr_pct": (chain_base - 1) * 100,
+        "diff_pp": (dietz_cum - chain_base) * 100,
+        "flow_definition": "depositsWithdrawals + assetTransfers on the ChangeInNAV date",
+    }
+
+    result: dict[str, Any] = {
+        "twr_pct": None,
+        "annualised_pct": None,
+        "raw_twr_pct": None,
+        "n_days": n_days,
+        "from_date": first_date.isoformat(),
+        "to_date": last_date.isoformat(),
+        "base_date": base_date.isoformat() if base_date else None,
+        "display_currency": target_ccy,
+        "fx_source": conv["fx_source"],
+        "fx_degraded": conv["fx_degraded"],
+        "source": "change_in_nav_daily.twr",
+        "quality": quality,
+        "reconciliation": reconciliation,
+    }
+    if not conv["complete"]:
+        result["note"] = f"Sin tipo de cambio CHF→{target_ccy}: cifras convertidas no disponibles."
+        if not summary:
+            result["series"] = []
+        return result
 
     series: list[dict] = []
     cumulative = 1.0
-    prev_nav: float | None = None
-    first_date: date | None = None
-    last_date: date | None = None
-    pending_cf = 0.0  # cashflows on NAV-less days, carried to the next NAV day
-    for row in rows:
-        nav_close_raw = float(row.nav_total) if row.nav_total is not None else None
-        cf_raw = float(row.external_cashflow or 0)
-        if nav_close_raw is None:
-            # Cashflow-only row (e.g. deposit settling after the last NAV
-            # snapshot): carry the flow to the next day with a NAV so the
-            # NAV jump is not booked as performance.
-            pending_cf += cf_raw
-            continue
-
-        date_str = row.snapshot_date.isoformat()
-        fx = fx_rates.get(row.snapshot_date, 1.0) if convert else 1.0
-        nav_close = nav_close_raw * fx
-        cf = (cf_raw + pending_cf) * fx
-        pending_cf = 0.0
-
-        if first_date is None:
-            first_date = row.snapshot_date
-        last_date = row.snapshot_date
-        nav_open = prev_nav
-        prev_nav = nav_close
-
-        if nav_open is None or nav_open == 0:
-            r_t = 0.0
-        else:
-            denom = nav_open + 0.5 * cf
-            r_t = ((nav_close - nav_open - cf) / denom) if denom else 0.0
+    dietz = 1.0
+    fx = conv["fx"]
+    for row, (d, r_t) in zip(rows, conv["returns"]):
         cumulative *= 1 + r_t
-        series.append({
-            "date": date_str,
-            "nav": nav_close,
-            "cashflow": cf,
+        point = {
+            "date": d.isoformat(),
+            "nav": _f(row.ending_value) * (fx.get(d, 1.0) if fx else 1.0),
+            "cashflow": (_f(row.deposits_withdrawals) + _f(row.asset_transfers))
+            * (fx.get(d, 1.0) if fx else 1.0),
             "daily_return_pct": r_t * 100,
             "cumulative_pct": (cumulative - 1) * 100,
-        })
+        }
+        if target_ccy == _ACCOUNT_BASE_CURRENCY:
+            dietz *= 1 + _dietz_daily(row)
+            point["dietz_cumulative_pct"] = (dietz - 1) * 100
+        series.append(point)
 
-    raw_twr_pct = (cumulative - 1) * 100 if series else None
-    n_days = (last_date - first_date).days if first_date and last_date else 0
+    raw_twr_pct = (cumulative - 1) * 100
     raw_annualised: float | None = None
-    if n_days > 0 and cumulative > 0:
+    if n_days >= _ANNUALISE_MIN_DAYS and cumulative > 0:
         raw_annualised = (cumulative ** (365 / n_days) - 1) * 100
-    quality = _series_quality([row.snapshot_date for row in rows if row.nav_total is not None])
-    twr_pct = raw_twr_pct if quality["is_reliable"] else None
-    annualised = raw_annualised if quality["is_reliable"] else None
 
-    return {
-        "series": series,
-        "twr_pct": twr_pct,
-        "annualised_pct": annualised,
-        "raw_twr_pct": raw_twr_pct,
-        "raw_annualised_pct": raw_annualised,
-        "n_days": n_days,
-        "from_date": first_date.isoformat() if first_date else None,
-        "to_date": last_date.isoformat() if last_date else None,
-        "display_currency": target_ccy,
-        "quality": quality,
-        "warmup_skipped": warmup_skipped,
-    }
+    result["raw_twr_pct"] = raw_twr_pct
+    result["twr_pct"] = raw_twr_pct if quality["is_reliable"] else None
+    result["annualised_pct"] = raw_annualised if quality["is_reliable"] else None
+    if raw_annualised is None and n_days < _ANNUALISE_MIN_DAYS:
+        result["annualised_note"] = "Ventana < 365 días: no se anualiza (GIPS)."
+    result["points"] = len(series)
+    if not summary:
+        result["series"] = series
+    return result

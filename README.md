@@ -21,6 +21,23 @@ This repository was published from a clean snapshot with a new Git history:
 See [`docs/publication-readiness.md`](docs/publication-readiness.md) for the
 data-safety checklist.
 
+The local
+`GET /portfolio/investmentlab-snapshot` endpoint publishes the strict
+`ibkr-dashboard.portfolio.v1` contract. It omits account identifiers and is
+context-only for Investmentlab.
+
+The backend can also send two margin notices through the existing Telegram
+bot. Live safety alerts use IBKR `Cushion`, `ExcessLiquidity`, maintenance
+margin, and look-ahead values. A separate weekly review compares current IBKR
+Pro loan rates with a historical ECB replay against CHF. The review is
+informational. It does not forecast FX, convert cash, or place orders. See
+[`docs/specs/margin-alerts.md`](docs/specs/margin-alerts.md).
+
+The Cartera positions table ends with one `CASH <currency>` row per currency
+(native balance, base value at the IBKR FX rate, % of NAV). Resumen, Margen and
+the weekly margin-usage message show liquidity as the % of NAV held in cash.
+See [`docs/methodology.md`](docs/methodology.md) §9.
+
 ## Quick Start
 
 Prerequisites:
@@ -46,6 +63,8 @@ IB_FLEX_QUERY_ID=...
 IB_FLEX_QUERY_ID_TC=...        # optional — only if you want intraday TC ingestion
 BASE_CURRENCY=CHF
 ENABLE_LIVE_OVERLAY=false
+TELEGRAM_BOT_TOKEN=...         # optional — needed for notifications
+TELEGRAM_CHAT_ID=...           # optional — needed for notifications
 ```
 
 Start the stack:
@@ -105,7 +124,9 @@ token plus one or more Flex Query IDs, both obtained inside Client Portal:
 3. Open **Flex Web Service Configuration**, enable the service, and generate a
    token. Save the token and its activation end date.
 4. Create an **Activity Flex Query** named `dashboard_full_daily`.
-5. Set output format to **XML**. The dashboard parser expects XML, not CSV/text.
+5. Set output format to **XML** and Period **Last 30 Calendar Days**. The
+   dashboard parser expects XML, not CSV/text; `Year to Date` was delivered
+   truncated by IBKR and froze the data for 26 days in 2026.
 6. Save the query and copy its Query ID into `IB_FLEX_QUERY_ID`.
 7. Optional: create a **Trade Confirmation Flex Query** named
    `dashboard_tc_daily` for execution-level fills and copy its Query ID into
@@ -123,7 +144,6 @@ Enable all available columns for these sections:
 - Account Information
 - Net Asset Value (NAV) in Base
 - Change in NAV in Base
-- MTD/YTD Performance Summary
 - Cash Report
 - Open Positions
 - Trades
@@ -154,9 +174,11 @@ are not baked into Docker images and are not tracked by Git.
 The backend database is stored in the Docker named volume
 `ibkr_dashboard_db_data`.
 
-By default, the frontend is published on `:5173` and the backend/API on
-`:8001` (`/docs` for Swagger). If you expose it through a private VPN, add that
-origin to `CORS_ORIGINS` in `.env`.
+By default, the frontend is published on `127.0.0.1:5173` and the backend/API on
+`127.0.0.1:8001` (`/docs` for Swagger), so the LAN sees neither. To reach the
+dashboard over Tailscale, run `tailscale serve --bg --tcp 5173 tcp://127.0.0.1:5173`
+once (`scripts/deploy_mac_mini.sh` does it when `tailscale` is installed). If a
+browser calls the API directly from another origin, add it to `CORS_ORIGINS` in `.env`.
 
 A `pre-commit` hook running `detect-secrets` (config in
 `.pre-commit-config.yaml`, known false positives in `.secrets.baseline`)
@@ -171,11 +193,14 @@ python3 -m venv .venv
 
 ## Services
 
-- `backend`: FastAPI on port `8000`, persistent SQLite volume at
-  `/app/data/ibkr_backend.db`; exposes 50 JSON endpoints
-  (47 GET read-only + 3 utility POST)
+- `backend`: FastAPI (container `:8000`, host `:8001`), persistent SQLite
+  volume at `/app/data/ibkr_backend.db`; nightly backup to
+  `${IBKR_BACKUP_DIR:-${HOME}/.ibkr-backups}`; exposes 52 JSON endpoints
+  (49 GET read-only + 3 utility POST)
 - `frontend`: nginx on port `5173`, serves the SPA and proxies `/api/*` to the
   backend service
+- `watchdog`: `docker:29.7.2-cli` sidecar (pinned by digest); restarts the
+  backend on a scheduler wedge (mounts `docker.sock`)
 
 ## Useful Commands
 
@@ -187,6 +212,19 @@ docker compose logs -f frontend
 docker compose run --rm bootstrap
 docker compose restart backend
 docker compose down
+```
+
+Margin diagnostics:
+
+```bash
+# Preview the current live safety band. Does not send or mutate state.
+docker exec ibkr-backend python -m ibkr_backend.cli margin-alert --source live --test
+
+# Preview the EOD estimate when TWS/Gateway is unavailable.
+docker exec ibkr-backend python -m ibkr_backend.cli margin-alert --source eod --test
+
+# Print the funding-currency comparison. Does not send Telegram.
+docker exec ibkr-backend python -m ibkr_backend.cli margin-financing
 ```
 
 To wipe the container database:

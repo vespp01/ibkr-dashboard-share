@@ -1,0 +1,112 @@
+/* Dividends page. Colours come from tokens.css; no literal hex values. */
+
+.dv-page { display: flex; flex-direction: column; gap: 16px; }
+
+.dv-hero-grid { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+.dv-hero .delta { font-size: var(--text-sm); }
+.dv-hero-hint { font-size: var(--text-xs); color: var(--fg-subtle); }
+
+.dv-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: stretch;
+}
+.dv-split-even { grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); }
+.dv-split > .dv-panel { grid-row: auto; align-self: stretch; }
+
+.dv-header-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+.panel-header .panel-title { margin-bottom: 0; }
+
+.dv-note { margin: 10px 0 0; font-size: var(--text-xs); color: var(--fg-muted); line-height: 1.4; }
+.dv-note-top { margin: -6px 0 10px; }
+
+.dv-chart-skeleton { height: 320px; border-radius: var(--radius-sm); }
+.dv-chart-skeleton.short { height: 180px; }
+
+/* Bars dim on hover (JS sets fill-opacity); fade it. */
+.dv-income-chart .recharts-bar-rectangle path { transition: fill-opacity var(--dur-fast) var(--ease-standard); }
+
+.dv-legend {
+  display: flex; flex-wrap: wrap; gap: 6px 16px;
+  list-style: none; margin: 8px 0 0; padding: 0;
+  font-size: var(--text-xs); color: var(--fg-muted);
+}
+.dv-legend li { display: inline-flex; align-items: center; gap: 6px; }
+.dv-legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.dv-legend i.line { height: 3px; width: 14px; border-radius: 2px; }
+.dv-legend i.ghost { border: 1.5px dashed var(--fg-muted); background: transparent; }
+
+/* ── Upcoming payments ─────────────────────────────── */
+.dv-timeline { position: relative; height: 18px; margin: 4px 6px 12px; }
+.dv-timeline-track {
+  position: absolute; left: 0; right: 0; top: 8px; height: 2px;
+  background: var(--border-card); border-radius: 2px;
+}
+.dv-timeline-dot {
+  position: absolute; top: 3px; width: 12px; height: 12px; margin-left: -6px;
+  border-radius: 50%; background: var(--color-primary);
+  box-shadow: 0 0 0 3px var(--color-primary-soft);
+  animation: dv-pop var(--dur-base) var(--ease-out-expo) both;
+}
+@keyframes dv-pop { from { opacity: 0; transform: scale(0.4); } to { opacity: 1; transform: scale(1); } }
+
+.dv-upcoming-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.dv-upcoming-list li {
+  display: grid; grid-template-columns: 76px minmax(0, 1fr) auto; gap: 12px; align-items: center;
+  padding: 10px 0; border-bottom: 1px solid var(--border-card);
+  animation: fade-in-up var(--dur-enter) var(--ease-out) both;
+  animation-delay: calc(var(--i, 0) * var(--stagger-step));
+}
+.dv-upcoming-list li:last-child { border-bottom: 0; }
+.dv-up-date, .dv-up-main, .dv-up-amount { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.dv-up-date strong, .dv-up-main strong, .dv-up-amount strong { color: var(--fg-strong); font-weight: 600; }
+.dv-up-date span, .dv-up-main span, .dv-up-amount span { font-size: var(--text-xs); color: var(--fg-muted); }
+.dv-up-amount { align-items: flex-end; }
+
+/* ── Heatmap ───────────────────────────────────────── */
+.dv-heatmap-scroll { overflow-x: auto; scrollbar-width: thin; }
+.dv-heatmap { width: 100%; min-width: 560px; border-collapse: separate; border-spacing: 3px; font-size: var(--text-xs); }
+.dv-heatmap th { color: var(--fg-muted); font-weight: 600; text-align: center; padding: 2px 0; }
+.dv-heatmap th[scope='row'] { text-align: left; padding-right: 8px; }
+.dv-heatmap td {
+  height: 30px; text-align: center; border-radius: 5px; color: var(--fg-strong);
+  font-variant-numeric: tabular-nums;
+  background: color-mix(in srgb, var(--color-primary) calc(12% + var(--i, 0) * 78%), transparent);
+  animation: fade-in var(--dur-base) var(--ease-out) both;
+  animation-delay: calc(var(--c, 0) * 18ms + var(--r, 0) * 40ms);
+}
+.dv-heatmap td.empty { background: color-mix(in srgb, var(--fg-muted) 6%, transparent); color: var(--fg-subtle); }
+.dv-heatmap td.partial { outline: 1px dashed var(--color-primary-bright); outline-offset: -2px; }
+.dv-heatmap td.total { background: transparent; color: var(--fg-strong); font-weight: 600; padding-left: 8px; }
+.dv-heatmap th.total { text-align: right; }
+
+/* ── Holdings ──────────────────────────────────────── */
+.dv-holdings th.num, .dv-holdings td.num { text-align: right; }
+.dv-share { display: flex; align-items: center; gap: 8px; min-width: 120px; }
+.dv-share-bar { flex: 1; height: 6px; border-radius: 3px; background: var(--color-primary-soft); overflow: hidden; }
+.dv-share-bar i {
+  display: block; height: 100%; background: var(--color-primary); border-radius: 3px;
+  transform-origin: left center;
+  animation: dv-grow var(--dur-slow) var(--ease-out-expo) both;
+}
+@keyframes dv-grow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+.dv-share .num { min-width: 52px; }
+
+.data-table th.num { text-align: right; }
+
+@media (max-width: 1100px) {
+  .dv-split, .dv-split-even { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (max-width: 760px) {
+  .dv-page { gap: 12px; }
+  .dv-chart-skeleton { height: 260px; }
+  .panel-header { flex-wrap: wrap; }
+  .dv-header-actions { justify-content: flex-start; }
+  .dv-upcoming-list li { grid-template-columns: 64px minmax(0, 1fr) auto; gap: 8px; }
+}
+
+/* global.css sets .data-table td { text-align: left } with higher specificity than .num */
+.data-table td.num, .data-table th.num { text-align: right; }
+.dv-share { min-width: 96px; }

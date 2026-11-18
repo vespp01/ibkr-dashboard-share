@@ -5,6 +5,7 @@ import {
 } from 'recharts';
 import { api, type PeriodFilters } from '../lib/api';
 import { ChartTooltip } from './ChartTooltip';
+import { formatCurrency } from '../lib/format';
 import { useI18n } from '../lib/i18n';
 
 interface Props {
@@ -92,7 +93,7 @@ const COPY = {
 
 function fmtCurrency(v: number | null | undefined, ccy: string, locale: string): string {
   if (v === undefined || v === null || Number.isNaN(v)) return '—';
-  return `${ccy} ${v.toLocaleString(locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return formatCurrency(v, ccy, locale);
 }
 
 function fmtDateTime(iso: string | undefined): { date: string; time: string } {

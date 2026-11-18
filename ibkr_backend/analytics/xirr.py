@@ -1,16 +1,17 @@
 """Money-weighted return — XIRR via pyxirr.
 
-External cash flows from `cash_transactions` (Deposits/Withdrawals,
-Internal Transfers) plus a single positive terminal value = current NAV.
+External cash flows come from `change_in_nav_daily` (`depositsWithdrawals +
+assetTransfers`, on the ChangeInNAV date — see `flows.py`) plus a single
+positive terminal value = ending NAV. In-kind transfers are flows: counting
+them as profit overstates XIRR.
 
 Sign convention (required for pyxirr to converge):
-  - Deposits (capital INTO the account)  → NEGATIVE
-  - Withdrawals (capital OUT)            → POSITIVE
-  - Terminal NAV (realised at terminal)  → POSITIVE
-IBKR's PortfolioAnalyst uses the same convention.
+  - Deposits (capital INTO the account)  -> NEGATIVE
+  - Withdrawals (capital OUT)            -> POSITIVE
+  - Terminal NAV (realised at terminal)  -> POSITIVE
 
-In `CashTransaction.amount`, deposits are stored as positive numbers
-(broker-liability view), so we negate them when building the flow list.
+XIRR is an annual rate: for windows shorter than 365 days `xirr_pct` is null
+(GIPS forbids annualising short periods); the window length is reported.
 """
 
 from __future__ import annotations
@@ -18,12 +19,14 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..db.models import CashTransaction, NavDaily
+from ..db.models import NavDaily
 from .filters import PeriodFilter
-from .metrics import DEPOSIT_TYPES
+from .flows import cin_flows
+
+_ANNUALISE_MIN_DAYS = 365
 
 
 def xirr_summary(
@@ -39,32 +42,16 @@ def xirr_summary(
 
     note: str | None = None
 
-    base_amount = CashTransaction.amount * func.coalesce(
-        CashTransaction.fx_rate_to_base, 1
-    )
-    q = select(
-        CashTransaction.settle_date,
-        CashTransaction.event_datetime,
-        func.sum(base_amount).label("amount"),
-    ).where(CashTransaction.type.in_(DEPOSIT_TYPES)).group_by(
-        CashTransaction.settle_date, CashTransaction.event_datetime
-    )
-    if account_id:
-        q = q.where(CashTransaction.account_id == account_id)
-    if period and period.start:
-        q = q.where(CashTransaction.settle_date >= period.start)
-    if period and period.end:
-        q = q.where(CashTransaction.settle_date <= period.end)
-
-    flows: list[tuple[date, float]] = []
-    for r in session.execute(q):
-        d = r.settle_date or (r.event_datetime.date() if r.event_datetime else None)
-        if d is None or r.amount is None:
-            continue
-        # CashTransaction.amount is positive for deposits, negative for withdrawals.
-        # pyxirr needs the opposite (cash into the investment = negative outflow
-        # from the investor's perspective), so we negate the stored sign.
-        flows.append((d, -float(r.amount)))
+    # CIN flows: deposits positive -> negated for pyxirr.
+    flows: list[tuple[date, float]] = [
+        (d, -a)
+        for d, a in cin_flows(
+            session,
+            account_id=account_id,
+            start=period.start if period else None,
+            end=period.end if period else None,
+        )
+    ]
 
     # Sub-period XIRR: synthesise the opening NAV as a negative "initial
     # investment" flow at period.start. Without this, pyxirr treats the
@@ -75,7 +62,7 @@ def xirr_summary(
         opening_q = (
             select(NavDaily.snapshot_date, NavDaily.nav_total)
             .where(NavDaily.snapshot_date < period.start)
-            .where(NavDaily.nav_total.is_not(None))  # skip cashflow-only rows
+            .where(NavDaily.nav_total.is_not(None))  # skip NAV-less rows
             .order_by(NavDaily.snapshot_date.desc())
             .limit(1)
         )
@@ -92,7 +79,7 @@ def xirr_summary(
 
     nav_q = (
         select(NavDaily.snapshot_date, NavDaily.nav_total)
-        .where(NavDaily.nav_total.is_not(None))  # skip cashflow-only rows
+        .where(NavDaily.nav_total.is_not(None))  # skip NAV-less rows
         .order_by(NavDaily.snapshot_date.desc())
         .limit(1)
     )
@@ -112,6 +99,8 @@ def xirr_summary(
     if len(flows) < 2:
         return {"xirr_pct": None, "flows": [{"date": d.isoformat(), "amount": a} for d, a in flows]}
 
+    window_days = (nav_row.snapshot_date - min(d for d, _ in flows)).days
+
     # pyxirr signature: xirr(dates, amounts) or xirr([(d, a), ...])
     try:
         rate = xirr(flows)
@@ -121,11 +110,17 @@ def xirr_summary(
             "error": f"XIRR did not converge: {e}",
             "flows": [{"date": d.isoformat(), "amount": a} for d, a in flows],
         }
+    annualised = window_days >= _ANNUALISE_MIN_DAYS
+    if not annualised:
+        note = "; ".join(filter(None, [note, "Ventana < 365 días: XIRR no se anualiza (GIPS)."]))
     return {
-        "xirr_pct": rate * 100 if rate is not None else None,
+        "xirr_pct": rate * 100 if (rate is not None and annualised) else None,
+        "annualised": annualised,
+        "window_days": window_days,
         "terminal_nav_base": float(nav_row.nav_total),
         "terminal_date": nav_row.snapshot_date.isoformat(),
         "flow_count": len(flows),
         "flows": [{"date": d.isoformat(), "amount": a} for d, a in flows],
+        "flow_source": "change_in_nav_daily.depositsWithdrawals + assetTransfers",
         "note": note,
     }

@@ -16,7 +16,7 @@ interface Props {
 }
 
 export function ChartTooltip({ active, payload, label, formatter }: Props) {
-  const { locale } = useI18n();
+  const { locale, privacyMode } = useI18n();
   if (!active || !payload || payload.length === 0) return null;
 
   return (
@@ -30,7 +30,7 @@ export function ChartTooltip({ active, payload, label, formatter }: Props) {
               : formatter
                 ? formatter(item.value, String(item.name ?? ''))
                 : typeof item.value === 'number'
-                  ? item.value.toLocaleString(locale, { maximumFractionDigits: 2 })
+                  ? (privacyMode ? '••••' : item.value.toLocaleString(locale, { maximumFractionDigits: 2 }))
                   : String(item.value);
           return (
             <div key={`${item.dataKey ?? idx}`} className="chart-tooltip-row">

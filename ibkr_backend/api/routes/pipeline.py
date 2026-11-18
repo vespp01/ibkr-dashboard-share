@@ -7,7 +7,13 @@ from sqlalchemy import select
 
 from ...config import get_settings
 from ...db.models import FlexRun
-from ...jobs.health import compute_staleness
+from ...jobs.backup import latest_backup_info
+from ...jobs.health import (
+    compute_data_freshness,
+    compute_staleness,
+    scheduler_heartbeat,
+    utc_iso,
+)
 from ...loaders.pipeline import run_full_pipeline
 from ..deps import SessionDep
 
@@ -25,7 +31,13 @@ router = APIRouter()
 def run(
     background: BackgroundTasks,
     response: Response,
-    period: str | None = Query("LastBusinessDay", description="Flex period code"),
+    period: str | None = Query(
+        None,
+        description="Flex period override (e.g. LastBusinessDay). Default empty = "
+        "use the query's own configured period, matching the scheduled pull. Most "
+        "IBKR queries have a fixed period and REJECT an override with HTTP 604, so "
+        "only set this if yours accepts one.",
+    ),
     from_date: str | None = Query(None, pattern="^[0-9]{8}$"),
     to_date: str | None = Query(None, pattern="^[0-9]{8}$"),
     asynchronous: bool = Query(False, alias="async"),
@@ -85,7 +97,7 @@ def runs(session: SessionDep, limit: int = Query(50, ge=1, le=500)):
     return [
         {
             "run_id": r.run_id,
-            "fetched_at": r.fetched_at.isoformat() if r.fetched_at else None,
+            "fetched_at": utc_iso(r.fetched_at),
             "from_date": r.from_date.isoformat() if r.from_date else None,
             "to_date": r.to_date.isoformat() if r.to_date else None,
             "rows_inserted": r.rows_inserted,
@@ -113,11 +125,19 @@ def status(session: SessionDep):
         "token_expiry": settings.ib_flex_token_expiry or None,
         "live_overlay_enabled": settings.enable_live_overlay,
         "staleness": compute_staleness(
-            session, threshold_hours=settings.pipeline_stale_after_hours
+            session, threshold_hours=settings.pipeline_stale_after_hours,
+            query_id=settings.ib_flex_query_id or None,
+        ),
+        "data_freshness": compute_data_freshness(
+            session, threshold_business_days=settings.data_stale_after_business_days
+        ),
+        "scheduler": scheduler_heartbeat(session),
+        "backup": latest_backup_info(
+            settings.backup_dir, stale_after_hours=settings.backup_stale_after_hours
         ),
         "latest_run": (
             {
-                "fetched_at": latest.fetched_at.isoformat() if latest and latest.fetched_at else None,
+                "fetched_at": utc_iso(latest.fetched_at) if latest else None,
                 "from_date": latest.from_date.isoformat() if latest and latest.from_date else None,
                 "to_date": latest.to_date.isoformat() if latest and latest.to_date else None,
                 "status": latest.status if latest else None,

@@ -10,13 +10,14 @@ This module centralises low-level utilities that used to drift between
    like `C;IA`, `C;P`, `C;FPA;P`, `C;IM;P`. Strict `open_close == 'C'`
    drops them in real brokerage exports. Use these
    helpers everywhere instead of writing the prefix check inline.
-4. `_to_base`: `amount * fx_rate_to_base`, treating null FX as 1.0.
+4. `_to_base`: `amount * fx_rate_to_base`; a NULL FX yields NULL (never 1.0).
 5. `_date_bucket` / `_dialect_is_sqlite`: portable date GROUP-BY across
    SQLite (dev/local) and Postgres (hypothetical future deploy).
 """
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 from decimal import Decimal
 
@@ -25,6 +26,8 @@ from sqlalchemy.orm import Session
 
 from ..db.models import PositionEod, Trade
 from .filters import PeriodFilter
+
+log = logging.getLogger(__name__)
 
 
 def _f(v) -> float | None:
@@ -75,8 +78,39 @@ def is_open(open_close: str | None) -> bool:
 
 
 def _to_base(amount, fx):
-    """`amount * fx_rate_to_base`, treating null FX as 1.0."""
-    return func.coalesce(amount * func.coalesce(fx, 1), 0)
+    """`amount * fx_rate_to_base`; NULL when either side is NULL.
+
+    A NULL FX used to be coalesced to 1.0, which silently summed HKD/GBP/EUR
+    amounts as if they were base currency (B04). Flex always supplies
+    `fxRateToBase` (1 for base-currency rows), so a NULL can only come from a
+    foreign source (the retired CSV loader). Callers wrap the result in
+    `SUM(...)`, which skips NULL rows; `null_fx_counts` reports them.
+    """
+    return amount * fx
+
+
+def null_fx_counts(session: Session) -> dict[str, int]:
+    """Rows that `_to_base` drops because `fx_rate_to_base` is NULL.
+
+    Logs a warning when any exist so the gap is visible instead of being summed
+    at 1.0. Returns `{table: count}` for the non-zero tables only.
+    """
+    from ..db.models import CashTransaction
+
+    out: dict[str, int] = {}
+    for name, model in (
+        ("trades", Trade),
+        ("cash_transactions", CashTransaction),
+        ("positions_eod", PositionEod),
+    ):
+        n = session.execute(
+            select(func.count()).select_from(model).where(model.fx_rate_to_base.is_(None))
+        ).scalar() or 0
+        if n:
+            out[name] = n
+    if out:
+        log.warning("NULL fx_rate_to_base rows excluded from base sums: %s", out)
+    return out
 
 
 def _dialect_is_sqlite() -> bool:

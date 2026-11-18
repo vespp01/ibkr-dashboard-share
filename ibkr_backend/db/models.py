@@ -294,34 +294,10 @@ class ChangeInNavDaily(Base):
     fx_translation: Mapped[Decimal | None] = mapped_column(MONEY)
     twr: Mapped[Decimal | None] = mapped_column(Numeric(20, 12))
     raw_xml: Mapped[str | None] = mapped_column(Text)
-
-
-class MtdYtdPerformance(Base):
-    """`<MTDYTDPerformanceSummaryUnderlying>` rows — per-symbol month-to-date
-    and year-to-date performance attribution, base currency.
-    """
-
-    __tablename__ = "mtd_ytd_performance"
-
-    snapshot_date: Mapped[date] = mapped_column(Date, primary_key=True)
-    account_id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    conid: Mapped[int] = mapped_column(
-        Integer, ForeignKey("instruments.conid"), primary_key=True
-    )
-    symbol: Mapped[str | None] = mapped_column(String(64))
-    asset_class: Mapped[str | None] = mapped_column(String(16))
-    mtm_mtd: Mapped[Decimal | None] = mapped_column(MONEY)
-    mtm_ytd: Mapped[Decimal | None] = mapped_column(MONEY)
-    realized_mtd: Mapped[Decimal | None] = mapped_column(MONEY)
-    realized_ytd: Mapped[Decimal | None] = mapped_column(MONEY)
-    unrealized_mtd: Mapped[Decimal | None] = mapped_column(MONEY)
-    unrealized_ytd: Mapped[Decimal | None] = mapped_column(MONEY)
-    fifo_mtd: Mapped[Decimal | None] = mapped_column(MONEY)
-    fifo_ytd: Mapped[Decimal | None] = mapped_column(MONEY)
-    other_mtd: Mapped[Decimal | None] = mapped_column(MONEY)
-    other_ytd: Mapped[Decimal | None] = mapped_column(MONEY)
-    total_mtd: Mapped[Decimal | None] = mapped_column(MONEY)
-    total_ytd: Mapped[Decimal | None] = mapped_column(MONEY)
+    # Added 2026-10 (B02/B53): in-kind transfers are an external flow and
+    # salesTax a waterfall component; both were dropped by the parser before.
+    asset_transfers: Mapped[Decimal | None] = mapped_column(MONEY)
+    sales_tax: Mapped[Decimal | None] = mapped_column(MONEY)
 
 
 class FifoPerformanceUnderlying(Base):
@@ -491,11 +467,16 @@ class InterestAccrual(Base):
     interest_type: Mapped[str | None] = mapped_column(String(48))
     interest: Mapped[Decimal | None] = mapped_column(MONEY)
     ending_balance: Mapped[Decimal | None] = mapped_column(MONEY)
+    raw_xml: Mapped[str | None] = mapped_column(Text)
 
+    # One row per (account, day, currency). `interest_type` is no longer part of
+    # the key (Flex never sends it; a NULL in a unique key never conflicts).
+    # Databases created before 2026-10 keep the old `uq_interest_accrual`
+    # constraint; `_ensure_ingest_schema` adds this index to them.
     __table_args__ = (
-        UniqueConstraint(
-            "account_id", "accrual_date", "currency", "interest_type",
-            name="uq_interest_accrual",
+        Index(
+            "uq_interest_accrual_day", "account_id", "accrual_date", "currency",
+            unique=True,
         ),
     )
 
@@ -505,8 +486,10 @@ class TransactionFee(Base):
 
     # Synthetic deterministic key — IBKR doesn't expose a stable id for these
     # (TransactionFees / TransactionTaxes). Built in the loader from
-    # (account_id, trade_id, report_date, tax_amount, tax_description) so reruns
-    # don't duplicate.
+    # (account_id, trade_id, report_date, tax_amount, tax_description, conid,
+    # quantity) so reruns don't duplicate and two equal-amount fees on
+    # different stocks stay distinct (B35). Changing this formula needs
+    # `cli rebootstrap-fees` (synthetic-id rule).
     fee_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     account_id: Mapped[str] = mapped_column(String(32), index=True)
     trade_id: Mapped[str | None] = mapped_column(String(64), index=True)
@@ -518,6 +501,7 @@ class TransactionFee(Base):
     tax_amount: Mapped[Decimal] = mapped_column(MONEY)
     tax_description: Mapped[str | None] = mapped_column(String(128))
     currency: Mapped[str | None] = mapped_column(String(8))
+    raw_xml: Mapped[str | None] = mapped_column(Text)
 
 
 class TradeExecution(Base):
@@ -617,6 +601,8 @@ class TradeExecution(Base):
 # -------------------------------------------------------------- Pipeline meta
 class FlexRun(Base):
     __tablename__ = "flex_runs"
+    # staleness / catch-up / retention all filter on (status, fetched_at).
+    __table_args__ = (Index("ix_flex_runs_status_fetched_at", "status", "fetched_at"),)
 
     run_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     query_id: Mapped[str | None] = mapped_column(String(64))
@@ -626,6 +612,11 @@ class FlexRun(Base):
     to_date: Mapped[date | None] = mapped_column(Date)
     rows_inserted: Mapped[int] = mapped_column(Integer, default=0)
     rows_skipped_dup: Mapped[int] = mapped_column(Integer, default=0)
+    # Rows overwritten by `upsert_replace` sections (a re-pull that changes
+    # values inserts 0 rows but is not a no-op).
+    rows_replaced: Mapped[int] = mapped_column(Integer, default=0)
+    # success | error | stale (success, but the statement ends before the last
+    # business day - 1: truncated query period).
     status: Mapped[str | None] = mapped_column(String(16))
     error: Mapped[str | None] = mapped_column(Text)
     note: Mapped[str | None] = mapped_column(String(64))
@@ -644,6 +635,26 @@ class NotificationState(Base):
 
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[str | None] = mapped_column(String(64))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_utcnow, onupdate=_utcnow
+    )
+
+
+class AppConfig(Base):
+    """Generic key/value application config — one JSON document per key.
+
+    Holds user-editable overrides that layer on top of the env-derived
+    ``Settings`` defaults. Today the only key is ``'notifications'`` — the
+    sparse notification-config document edited from the dashboard Settings
+    page (per-message enable / sections / cadence). ``value`` is a JSON string
+    (``Text``, Postgres-portable). Created by ``init_db()`` — no migration
+    framework in this project.
+    """
+
+    __tablename__ = "app_config"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str | None] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=_utcnow, onupdate=_utcnow
     )

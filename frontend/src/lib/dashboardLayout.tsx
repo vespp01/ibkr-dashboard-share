@@ -2,11 +2,10 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 
 export type DashboardCardId =
   | 'accountSummary'
+  | 'riskStrip'
   | 'tradingQuality'
-  | 'pnlAttribution'
   | 'tradeCalendar'
   | 'activityTiles'
-  | 'coreKpis'
   | 'allTimeReturn'
   | 'realizedMonthly'
   | 'totalReturnMonthly';
@@ -28,15 +27,15 @@ export const DASHBOARD_CARDS: DashboardCardDefinition[] = [
     recommended: true,
   },
   {
-    id: 'tradingQuality',
-    titleKey: 'dashboardCards.tradingQuality.title',
-    descriptionKey: 'dashboardCards.tradingQuality.description',
+    id: 'riskStrip',
+    titleKey: 'dashboardCards.riskStrip.title',
+    descriptionKey: 'dashboardCards.riskStrip.description',
     recommended: true,
   },
   {
-    id: 'pnlAttribution',
-    titleKey: 'dashboardCards.pnlAttribution.title',
-    descriptionKey: 'dashboardCards.pnlAttribution.description',
+    id: 'tradingQuality',
+    titleKey: 'dashboardCards.tradingQuality.title',
+    descriptionKey: 'dashboardCards.tradingQuality.description',
     recommended: true,
   },
   {
@@ -52,12 +51,6 @@ export const DASHBOARD_CARDS: DashboardCardDefinition[] = [
     recommended: true,
   },
   {
-    id: 'coreKpis',
-    titleKey: 'dashboardCards.coreKpis.title',
-    descriptionKey: 'dashboardCards.coreKpis.description',
-    recommended: true,
-  },
-  {
     id: 'allTimeReturn',
     titleKey: 'dashboardCards.allTimeReturn.title',
     descriptionKey: 'dashboardCards.allTimeReturn.description',
@@ -67,7 +60,7 @@ export const DASHBOARD_CARDS: DashboardCardDefinition[] = [
     id: 'realizedMonthly',
     titleKey: 'dashboardCards.realizedMonthly.title',
     descriptionKey: 'dashboardCards.realizedMonthly.description',
-    recommended: false,
+    recommended: true,
   },
   {
     id: 'totalReturnMonthly',

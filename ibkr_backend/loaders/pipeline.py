@@ -29,7 +29,6 @@ from ..db.models import (
     FxRate,
     Instrument,
     InterestAccrual,
-    MtdYtdPerformance,
     MtmPerformanceUnderlying,
     NavDaily,
     OptionExerciseAssignment,
@@ -44,9 +43,11 @@ from ..flex.parser import (
     ParsedStatement,
     parse_flex_xml,
 )
+from ..analytics._common import null_fx_counts
 from ..analytics.options_parsing import enrich_option
 from ._asset_class import canon as _canon_asset_class
 from ._upsert import upsert_ignore, upsert_replace
+from .hygiene import backfill_base_currency
 
 log = logging.getLogger(__name__)
 
@@ -78,6 +79,32 @@ class PipelineResult:
     @property
     def total_skipped(self) -> int:
         return sum(s.skipped for s in self.sections)
+
+    @property
+    def total_replaced(self) -> int:
+        return sum(s.replaced for s in self.sections)
+
+
+def _previous_business_day(d: date) -> date:
+    """Most recent Mon-Fri strictly before `d` (exchange holidays ignored)."""
+    d -= timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
+def is_truncated_statement(to_date: date | None, today: date | None = None) -> bool:
+    """True when a statement ends before (last business day - 1).
+
+    A query whose portal period stops covering recent days still returns
+    `success` with 0 new rows (Aug-Sep 2026: found 26 days late). Marking the
+    run `stale` makes the health checks, which only count `success` runs, see
+    it. A statement without a `toDate` cannot be judged and is not stale.
+    """
+    if to_date is None:
+        return False
+    last_bd = _previous_business_day((today or date.today()))
+    return to_date < _previous_business_day(last_bd)
 
 
 # -------------------------------------------------------------------- public
@@ -125,11 +152,20 @@ def run_full_pipeline(
             result.from_date = min(s.from_date for s in statements if s.from_date) if any(s.from_date for s in statements) else None
             result.to_date = max(s.to_date for s in statements if s.to_date) if any(s.to_date for s in statements) else None
 
+        # A pull with an explicit window (bootstrap, TC backfill) is historical
+        # by design, so only the saved-period pulls are judged for staleness.
+        stale = not (from_date or to_date) and is_truncated_statement(result.to_date)
+        if stale:
+            log.warning(
+                "Flex statement ends %s, before the last business day - 1: "
+                "run marked stale (check the query's portal period)",
+                result.to_date,
+            )
         with session_scope() as session:
             for stmt in statements:
                 section_results = load_statement(session, stmt)
                 result.sections.extend(section_results)
-            _log_run(session, result, note=note, status="success")
+            _log_run(session, result, note=note, status="stale" if stale else "success")
     except Exception as e:  # noqa: BLE001
         result.error = _safe_error(e, secrets=(settings.ib_flex_token, qid))
         log.exception("Pipeline failed: %s", result.error)
@@ -182,12 +218,16 @@ def load_statement(session: Session, stmt: ParsedStatement) -> list[LoadResult]:
     out.append(_load_interest_accruals(session, stmt))
     out.append(_load_transaction_fees(session, stmt))
     out.append(_load_change_in_nav(session, stmt))
-    out.append(_load_mtd_ytd_performance(session, stmt))
     out.append(_load_fifo_performance(session, stmt))
     out.append(_load_mtm_performance(session, stmt))
     out.append(_load_trade_executions(session, stmt))
     out.append(_load_option_eae(session, stmt))
     out.append(_load_transfers(session, stmt))
+    # Self-heal: repair any account left without a base_currency from the NAV
+    # rows just loaded (statements without an EquitySummary currency leave it
+    # NULL — nav_daily carries the canonical value).
+    backfill_base_currency(session)
+    null_fx_counts(session)  # logs a warning when a row would be dropped from base sums
     return out
 
 
@@ -217,15 +257,29 @@ def _load_account(session: Session, stmt: ParsedStatement) -> LoadResult:
     a = stmt.account
     if not a.account_id:
         return LoadResult(section="accounts")
-    rows = [
-        {
-            "account_id": a.account_id,
-            "base_currency": a.base_currency,
-            "alias": a.alias,
-            "account_type": a.account_type,
-        }
-    ]
-    n = upsert_replace(session, Account, rows, pk_cols=["account_id"])
+    row: dict = {"account_id": a.account_id}
+    # Identity columns describe the account, not a point-in-time snapshot. Write
+    # only the ones this statement actually carries: a pull that omits them
+    # (e.g. a weekend LastBusinessDay statement without an EquitySummary /
+    # AccountInformation currency) must never overwrite a previously-known value
+    # with NULL. backfill_base_currency() repairs any account left without one.
+    for col, val in (
+        ("base_currency", a.base_currency),
+        ("alias", a.alias),
+        ("account_type", a.account_type),
+    ):
+        if val is not None:
+            row[col] = val
+    data_cols = [c for c in row if c != "account_id"]
+    if data_cols:
+        n = upsert_replace(
+            session, Account, [row],
+            pk_cols=["account_id"], update_cols=[*data_cols, "updated_at"],
+        )
+    else:
+        # Nothing but the id this time — insert if new, leave any existing row
+        # (and its known base_currency/alias) untouched.
+        n, _ = upsert_ignore(session, Account, [row], pk_cols=["account_id"])
     return LoadResult(section="accounts", replaced=n)
 
 
@@ -254,12 +308,17 @@ def _load_instruments(session: Session, stmt: ParsedStatement) -> LoadResult:
             seen.setdefault(ct.conid, _stub_instrument_row(
                 ct.conid, ct.symbol or "", ct.asset_class, ct.currency,
             ))
-    rows = list(seen.values())
-    if not rows:
+    if not seen:
         return LoadResult(section="instruments")
-    # Use replace so newer SecuritiesInfo (sector/industry) wins over discovery.
+    # Rows from SecuritiesInfo carry the full enrichment: replace so newer
+    # values win. Discovery stubs (conid known only from trades/positions)
+    # carry NULL for every enrichment field, so they must only create missing
+    # rows and never overwrite an enriched one (B38).
+    full_conids = {i.conid for i in stmt.instruments}
+    full_rows = [r for c, r in seen.items() if c in full_conids]
+    stub_rows = [r for c, r in seen.items() if c not in full_conids]
     n = upsert_replace(
-        session, Instrument, rows, pk_cols=["conid"],
+        session, Instrument, full_rows, pk_cols=["conid"],
         update_cols=[
             "symbol", "description", "asset_class", "sub_category",
             "isin", "cusip", "figi", "listing_exchange", "issuer",
@@ -267,7 +326,8 @@ def _load_instruments(session: Session, stmt: ParsedStatement) -> LoadResult:
             "option_expiry", "option_right", "option_strike", "sector", "industry",
         ],
     )
-    return LoadResult(section="instruments", replaced=n)
+    created, _ = upsert_ignore(session, Instrument, stub_rows, pk_cols=["conid"])
+    return LoadResult(section="instruments", inserted=created, replaced=n)
 
 
 def _instrument_row(i) -> dict:
@@ -545,7 +605,10 @@ def _load_nav(session: Session, stmt: ParsedStatement) -> LoadResult:
     return LoadResult(section="nav_daily", replaced=len(rows))
 
 
-_EXTERNAL_CASHFLOW_TYPES = ("Deposits/Withdrawals", "Internal Transfers")
+# Legacy `nav_daily.external_cashflow` derivation. NO analytics reads it any
+# more: flows come from ChangeInNAV (`analytics/flows.py`). "Internal
+# Transfers" was a dead type (0 rows ever) and is gone.
+_EXTERNAL_CASHFLOW_TYPES = ("Deposits/Withdrawals",)
 
 
 def _external_cashflows_by_settle_date(transactions) -> dict[tuple[date, str], Decimal]:
@@ -574,21 +637,21 @@ def _external_cashflows_by_settle_date(transactions) -> dict[tuple[date, str], D
 
 
 def _refresh_external_cashflows(session: Session, stmt: ParsedStatement) -> None:
-    """Sum Deposits/Withdrawals (and ACATS transfers) per (settle date, account)."""
+    """Sum Deposits/Withdrawals per (settle date, account) onto EXISTING nav_daily rows.
+
+    Never inserts: a deposit settling on a day without a NAV (weekend) used to
+    create a NAV-less `nav_daily` row (2023-11-18), which broke "first NAV day"
+    logic (B50). Flows on such days are simply not mirrored here.
+    """
     if not stmt.cash_transactions:
         return
     by_day = _external_cashflows_by_settle_date(stmt.cash_transactions)
     if not by_day:
         return
-    rows = [
-        {"snapshot_date": d, "account_id": acc, "external_cashflow": cf}
-        for (d, acc), cf in by_day.items()
-    ]
-    upsert_replace(
-        session, NavDaily, rows,
-        pk_cols=["snapshot_date", "account_id"],
-        update_cols=["external_cashflow"],
-    )
+    for (d, acc), cf in by_day.items():
+        nav = session.get(NavDaily, (d, acc))
+        if nav is not None:
+            nav.external_cashflow = cf
 
 
 def reconcile_external_cashflows(session: Session) -> int:
@@ -702,82 +765,44 @@ def _load_dividend_accruals(session: Session, stmt: ParsedStatement) -> LoadResu
     return LoadResult(section="dividend_accruals", inserted=inserted, skipped=skipped)
 
 
-_INTEREST_ACCRUAL_KEY = ["account_id", "accrual_date", "currency", "interest_type"]
+_INTEREST_ACCRUAL_KEY = ["account_id", "accrual_date", "currency"]
 
 
 def _load_interest_accruals(session: Session, stmt: ParsedStatement) -> LoadResult:
-    rows = [
-        {
+    """Upsert one row per (account, day, currency).
+
+    The key has no nullable column, so `ON CONFLICT` works and a re-pull fills
+    `interest` / `raw_xml` on rows stored earlier with only `ending_balance`.
+    """
+    by_key: dict[tuple, dict] = {}
+    for i in stmt.interest_accruals:
+        by_key[(i.account_id, i.accrual_date, i.currency)] = {
             "account_id": i.account_id,
             "accrual_date": i.accrual_date,
             "currency": i.currency,
             "interest_type": i.interest_type,
             "interest": i.interest,
             "ending_balance": i.ending_balance,
+            "raw_xml": i.raw or None,
         }
-        for i in stmt.interest_accruals
-    ]
+    rows = list(by_key.values())
     if not rows:
         return LoadResult(section="interest_accruals")
-
-    # Same NULL-key hazard as dividend_accruals: interest_type is nullable
-    # and part of uq_interest_accrual, but SQL NULLs never compare equal, so
-    # ON CONFLICT cannot catch rows without interestType — they would be
-    # re-inserted on every load. Route those through a manual NULL-aware
-    # existence check; fully-keyed rows keep the fast upsert path.
-    keyed_rows: list[dict] = []
-    null_key_rows: list[dict] = []
-    seen_null_keys: set[tuple] = set()
-    inserted = skipped = 0
-    for r in rows:
-        if all(r[c] is not None for c in _INTEREST_ACCRUAL_KEY):
-            keyed_rows.append(r)
-            continue
-        key = tuple(r[c] for c in _INTEREST_ACCRUAL_KEY)
-        if key in seen_null_keys:  # in-batch duplicate
-            skipped += 1
-            continue
-        seen_null_keys.add(key)
-        null_key_rows.append(r)
-
-    if keyed_rows:
-        ins, skip = upsert_ignore(
-            session, InterestAccrual, keyed_rows,
-            pk_cols=_INTEREST_ACCRUAL_KEY,
-        )
-        inserted += ins
-        skipped += skip
-
-    for r in null_key_rows:
-        conds = [
-            getattr(InterestAccrual, c).is_(None)
-            if r[c] is None
-            else getattr(InterestAccrual, c) == r[c]
-            for c in _INTEREST_ACCRUAL_KEY
-        ]
-        exists = session.execute(
-            select(InterestAccrual.id).where(*conds).limit(1)
-        ).first()
-        if exists:
-            skipped += 1
-        else:
-            session.add(InterestAccrual(**r))
-            inserted += 1
-    # session has autoflush=False: flush so the existence check above sees
-    # these rows if another statement in the same scope repeats a NULL key.
-    if inserted:
-        session.flush()
-
-    return LoadResult(section="interest_accruals", inserted=inserted, skipped=skipped)
+    n = upsert_replace(
+        session, InterestAccrual, rows, pk_cols=_INTEREST_ACCRUAL_KEY,
+        update_cols=["interest_type", "interest", "ending_balance", "raw_xml"],
+    )
+    return LoadResult(section="interest_accruals", replaced=n)
 
 
 def _load_transaction_fees(session: Session, stmt: ParsedStatement) -> LoadResult:
     rows = []
+    seen_keys: dict[str, int] = {}
     for t in stmt.transaction_fees:
-        fee_id = _synthetic_fee_id(
-            t.account_id, t.trade_id or "", t.report_date,
-            t.tax_amount, t.tax_description or "",
-        )
+        base_id = fee_id_for(t)
+        occurrence = seen_keys.get(base_id, 0)
+        seen_keys[base_id] = occurrence + 1
+        fee_id = fee_id_for(t, occurrence) if occurrence else base_id
         rows.append({
             "fee_id": fee_id,
             "account_id": t.account_id,
@@ -790,11 +815,47 @@ def _load_transaction_fees(session: Session, stmt: ParsedStatement) -> LoadResul
             "tax_amount": t.tax_amount,
             "tax_description": t.tax_description,
             "currency": t.currency,
+            "raw_xml": t.raw or None,
         })
     if not rows:
         return LoadResult(section="transaction_fees")
-    inserted, skipped = upsert_ignore(session, TransactionFee, rows, pk_cols=["fee_id"])
-    return LoadResult(section="transaction_fees", inserted=inserted, skipped=skipped)
+    # Replace the descriptive columns so a re-pull completes rows stored before
+    # trade_id / event_datetime / raw_xml were captured. The key columns are
+    # untouched.
+    n = upsert_replace(
+        session, TransactionFee, rows, pk_cols=["fee_id"],
+        update_cols=["trade_id", "symbol", "event_datetime", "currency", "raw_xml"],
+    )
+    return LoadResult(section="transaction_fees", replaced=n)
+
+
+def fee_id_for(t, occurrence: int = 0) -> str:
+    """Deterministic `fee_` key for a parsed fee row (B35 formula).
+
+    Built from account, report date, amount, description, conid and quantity,
+    plus `occurrence` (0 for the first row with that key in a statement, 1 for
+    the next identical one, ...). `trade_id` is deliberately NOT part of the
+    key: whether Flex fills it must not change the id, or a re-pull would
+    duplicate rows already stored. Two fills with the same amount and quantity
+    on one day keep distinct ids through `occurrence`. Do not change this
+    formula without a `rekey-fees` run: stored rows keep their old ids.
+    """
+    return _synthetic_fee_id(
+        t.account_id, t.report_date, _canon_decimal(t.tax_amount),
+        t.tax_description or "", t.conid or "", _canon_decimal(t.quantity), occurrence,
+    )
+
+
+def _canon_decimal(v) -> str:
+    """Decimal text that is the same for `-0.4131`, `-0.41310000` and a float.
+
+    Parsed rows hold Decimal('-0.4131'); rows read back from the database hold
+    Decimal('-0.41310000'). Both must hash to the same fee id.
+    """
+    if v is None:
+        return ""
+    d = Decimal(str(v)).normalize()
+    return "0" if d == 0 else format(d, "f")
 
 
 def _synthetic_fee_id(*parts) -> str:
@@ -826,6 +887,8 @@ def _load_change_in_nav(session: Session, stmt: ParsedStatement) -> LoadResult:
             "deposits_withdrawals": r.deposits_withdrawals,
             "fx_translation": r.fx_translation,
             "twr": r.twr,
+            "asset_transfers": r.asset_transfers,
+            "sales_tax": r.sales_tax,
             "raw_xml": r.raw,
         }
         for r in stmt.change_in_nav
@@ -838,54 +901,6 @@ def _load_change_in_nav(session: Session, stmt: ParsedStatement) -> LoadResult:
         pk_cols=["snapshot_date", "account_id"],
     )
     return LoadResult(section="change_in_nav", replaced=n)
-
-
-def _load_mtd_ytd_performance(
-    session: Session, stmt: ParsedStatement
-) -> LoadResult:
-    # Backfill instruments first so FK holds.
-    conids_in_rows = {r.conid for r in stmt.mtd_ytd_performance}
-    known = {i.conid for i in stmt.instruments}
-    missing = conids_in_rows - known
-    if missing:
-        symbol_by_conid = {r.conid: r.symbol for r in stmt.mtd_ytd_performance}
-        ac_by_conid = {r.conid: r.asset_class for r in stmt.mtd_ytd_performance}
-        stub_rows = [
-            _stub_instrument_row(cid, symbol_by_conid.get(cid) or "", ac_by_conid.get(cid))
-            for cid in missing
-        ]
-        upsert_ignore(session, Instrument, stub_rows, pk_cols=["conid"])
-
-    rows = [
-        {
-            "snapshot_date": r.snapshot_date,
-            "account_id": r.account_id,
-            "conid": r.conid,
-            "symbol": r.symbol,
-            "asset_class": _canon_asset_class(r.asset_class),
-            "mtm_mtd": r.mtm_mtd,
-            "mtm_ytd": r.mtm_ytd,
-            "realized_mtd": r.realized_mtd,
-            "realized_ytd": r.realized_ytd,
-            "unrealized_mtd": r.unrealized_mtd,
-            "unrealized_ytd": r.unrealized_ytd,
-            "fifo_mtd": r.fifo_mtd,
-            "fifo_ytd": r.fifo_ytd,
-            "other_mtd": r.other_mtd,
-            "other_ytd": r.other_ytd,
-            "total_mtd": r.total_mtd,
-            "total_ytd": r.total_ytd,
-        }
-        for r in stmt.mtd_ytd_performance
-        if r.account_id and r.account_id != "-"
-    ]
-    if not rows:
-        return LoadResult(section="mtd_ytd_performance")
-    n = upsert_replace(
-        session, MtdYtdPerformance, rows,
-        pk_cols=["snapshot_date", "account_id", "conid"],
-    )
-    return LoadResult(section="mtd_ytd_performance", replaced=n)
 
 
 def _load_fifo_performance(
@@ -1135,6 +1150,7 @@ def _log_run(
             to_date=result.to_date,
             rows_inserted=result.total_inserted,
             rows_skipped_dup=result.total_skipped,
+            rows_replaced=result.total_replaced,
             status=status,
             error=result.error,
             note=note,

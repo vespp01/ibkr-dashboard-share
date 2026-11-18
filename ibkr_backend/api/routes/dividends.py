@@ -8,6 +8,7 @@ from ...analytics import (
     dividends_by_country,
     dividends_summary,
     dividends_timeseries,
+    upcoming_dividends,
     withholding_tax_by_country,
 )
 from ..deps import PeriodDep, SessionDep
@@ -54,3 +55,12 @@ def withholding_by_country(
     return withholding_tax_by_country(
         session, period=period, account_id=account_id
     )
+
+
+@router.get("/upcoming")
+def upcoming(
+    session: SessionDep,
+    account_id: str | None = Query(None),
+):
+    """Open Flex accruals paying on/after the data date (forward-looking)."""
+    return upcoming_dividends(session, account_id=account_id)

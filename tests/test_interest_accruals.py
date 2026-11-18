@@ -1,10 +1,9 @@
-"""Idempotency of interest_accruals when interest_type is NULL.
+"""Idempotency of interest_accruals.
 
-The uq_interest_accrual constraint spans (account_id, accrual_date, currency,
-interest_type), but interest_type is nullable and SQL NULLs never compare
-equal — `ON CONFLICT DO NOTHING` silently re-inserts any accrual without
-interestType on every load. The loader must dedupe those rows itself with a
-NULL-aware existence check, same pattern as dividend_accruals (finding B10).
+The key is (account_id, accrual_date, currency): `interest_type` is no longer
+part of it (Flex never sends it, and a NULL in a unique key never conflicts, so
+the old key re-inserted every row on every load). Parsing of `interestAccrued`
+is covered in test_ingest_hygiene.py.
 """
 
 from __future__ import annotations

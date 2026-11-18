@@ -18,19 +18,28 @@ seen carry the OSI form on `Trade.symbol`.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
+from typing import Annotated, Literal
 
-from sqlalchemy import and_, func, select
+from pydantic import Field, model_validator
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..db.models import (
     CashTransaction,
     Instrument,
     MtmPerformanceUnderlying,
+    NavDaily,
     OptionExerciseAssignment,
     PositionEod,
     Trade,
+)
+from ..integrations.investmentlab import (
+    MAX_READY_AGE_DAYS,
+    SnapshotStatus,
+    StrictContractModel,
+    freshness_status,
 )
 from ._common import _apply_period, _f, is_closed, is_closed_filter, is_open, is_open_filter
 from .filters import PeriodFilter
@@ -39,8 +48,8 @@ from .metrics import (
     INTEREST_PAID_TYPES,
     INTEREST_RECV_TYPES,
     WITHHOLDING_TYPES,
-    _classify_multi_leg,
 )
+from .trades import multi_leg_labels
 # OCC parsing lives in `options_parsing` — pure regex, no DB.
 # Re-exported here so existing callers (frontend `import { parse_occ_symbol }`
 # from the test suite) keep working.
@@ -113,7 +122,7 @@ def options_trades_list(
     base_commission = func.coalesce(
         Trade.ib_commission * func.coalesce(Trade.fx_rate_to_base, 1), 0
     )
-    # net_cash already nets ibCommission (per CLAUDE.md); use it as the
+    # net_cash already nets ibCommission (IBKR Flex semantics); use it as the
     # summary "net premium" so the KPI agrees with the premium-timeseries
     # chart (which also bins by net_cash).
     base_cash = func.coalesce(
@@ -161,33 +170,11 @@ def options_trades_list(
     # intentionally bypass the OPT filter when fetching siblings so combos
     # that mix stock + option legs (covered call, protective put) classify
     # correctly. The lookup is keyed by `trade_id`.
-    multi_strategy_by_trade: dict[str, str] = {}
-    multi_legs_count_by_trade: dict[str, int] = {}
-    order_keys = {
+    multi_strategy_by_trade, multi_legs_count_by_trade = multi_leg_labels(session, {
         (t.ib_order_id, t.trade_date, t.account_id)
         for t, *_ in page
         if t.ib_order_id and t.trade_date and t.account_id
-    }
-    if order_keys:
-        order_ids = {oid for oid, _, _ in order_keys}
-        sibling_q = (
-            select(Trade, Instrument)
-            .join(Instrument, Instrument.conid == Trade.conid, isouter=True)
-            .where(Trade.ib_order_id.in_(order_ids))
-        )
-        siblings = list(session.execute(sibling_q))
-        groups: dict[tuple[str, date, str], list[tuple[Trade, Instrument | None]]] = {}
-        for t, instr in siblings:
-            if not (t.ib_order_id and t.trade_date and t.account_id):
-                continue
-            groups.setdefault((t.ib_order_id, t.trade_date, t.account_id), []).append((t, instr))
-        for key, group in groups.items():
-            if key not in order_keys or len(group) < 2:
-                continue
-            label = _classify_multi_leg(group) or f"Multi-leg ({len(group)})"
-            for t, _ in group:
-                multi_strategy_by_trade[t.trade_id] = label
-                multi_legs_count_by_trade[t.trade_id] = len(group)
+    })
 
     realized_total = sum(p for _, _, p, _, _, _, _ in enriched)
     net_premium = sum(ca for _, _, _, _, _, ca, _ in enriched)
@@ -217,19 +204,25 @@ def options_trades_list(
 
     rows = []
     for t, instr, pnl_b, proc_b, comm_b, _cash_b, c in page:
-        # Capital at risk: notional = strike × multiplier × |qty|, in base ccy.
-        # This is the correct denominator for cash-secured puts and covered
-        # calls (the universally requested ROC; mirrors premium-tracker's
-        # AROC). For long debits it overstates capital — the real cap was the
-        # premium paid. Documented trade-off; refine when ≥50 long trades.
+        # Capital at risk. Short premium (cash-secured puts, covered calls):
+        # strike notional = strike × multiplier × |qty|, the universally
+        # requested ROC (mirrors premium-tracker's AROC). Long options close
+        # with SELL: the capital at risk was the debit paid to open, which is
+        # the close proceeds minus the realized P&L (P&L = proceeds - debit).
         qty = _f(t.quantity) or 0.0
         mult = _f(t.multiplier) or 1.0
         fx = _f(t.fx_rate_to_base) or 1.0
-        capital_at_risk_base: float | None = (
-            abs(qty) * mult * c.strike * fx
-            if (c.strike is not None and qty)
-            else None
-        )
+        is_long_close = is_closed(t.open_close) and (t.buy_sell or "").upper() == "SELL"
+        capital_at_risk_base: float | None
+        if is_long_close:
+            debit = abs(proc_b) - (pnl_b or 0.0)
+            capital_at_risk_base = debit if debit > 0 else None
+        else:
+            capital_at_risk_base = (
+                abs(qty) * mult * c.strike * fx
+                if (c.strike is not None and qty)
+                else None
+            )
         roc_pct: float | None = (
             (pnl_b / capital_at_risk_base * 100)
             if (is_closed(t.open_close) and capital_at_risk_base and capital_at_risk_base > 0)
@@ -585,6 +578,12 @@ def options_open_positions(
 
     today = date.today()
     stock_close = _latest_stock_closes(session, latest_snap)
+    nav_q = select(func.sum(NavDaily.nav_total)).where(
+        NavDaily.snapshot_date == latest_snap, NavDaily.nav_total.is_not(None)
+    )
+    if account_id:
+        nav_q = nav_q.where(NavDaily.account_id == account_id)
+    nav_total = float(session.execute(nav_q).scalar() or 0)
     rows = []
     for pos, instr in session.execute(q):
         contract = _enrich_option(pos.symbol, instr)
@@ -637,7 +636,8 @@ def options_open_positions(
             "cost_basis_money_base": cost_basis_base,
             "fifo_pnl_unrealized_base": unrealized_base,
             "unrealized_pct": unrealized_pct,
-            "pct_of_nav": _f(pos.pct_of_nav),
+            # Over total NAV (Flex percentOfNAV is per asset class: a lone option read 100).
+            "pct_of_nav": (float(position_value_base) / nav_total * 100) if nav_total else None,
             "last_underlying_close": last_close,
             "moneyness_pct": moneyness_pct,
             "currency": pos.currency,
@@ -669,6 +669,233 @@ def options_open_positions(
             "expired": sum(1 for r in rows if r["dte"] is not None and r["dte"] < 0),
         },
     }
+
+
+# ---------------------------------------------------------------- contract
+
+OPTIONS_SCHEMA_VERSION = "ibkr-dashboard.options.v1"
+
+
+class OptionsContractLeg(StrictContractModel):
+    conid: int = Field(ge=1)
+    underlying: Annotated[str, Field(min_length=1, max_length=64)]
+    right: Literal["P", "C"]
+    strike: float = Field(gt=0)
+    expiry: date
+    multiplier: int = Field(ge=1)
+    quantity: float
+    currency: Annotated[str, Field(pattern=r"^[A-Z]{3}$")]
+    avg_cost_per_share: Annotated[float, Field(gt=0)] | None
+    mark_price: float | None
+
+
+class OptionsContractSnapshot(StrictContractModel):
+    schema_version: Literal[OPTIONS_SCHEMA_VERSION]
+    producer: Literal["ibkr-dashboard"]
+    generated_at: datetime
+    as_of: date | None
+    status: SnapshotStatus
+    days_stale: int | None = Field(ge=0)
+    legs: list[OptionsContractLeg]
+    warnings: list[Annotated[str, Field(pattern=r"^[A-Z0-9_]+$")]]
+
+    @model_validator(mode="after")
+    def validate_consistency(self) -> "OptionsContractSnapshot":
+        if self.generated_at.tzinfo is None:
+            raise ValueError("generated_at must include a timezone")
+        if len({leg.conid for leg in self.legs}) != len(self.legs):
+            raise ValueError("legs must be aggregated to one row per conid")
+        if any(leg.quantity == 0 for leg in self.legs):
+            raise ValueError("legs must carry a non-zero quantity")
+        if len(set(self.warnings)) != len(self.warnings):
+            raise ValueError("warnings must be unique")
+        if self.status == "blocked" and self.legs:
+            raise ValueError("blocked snapshots cannot expose option legs")
+        if self.status != "blocked" and (self.as_of is None or self.days_stale is None):
+            raise ValueError("usable snapshots require as_of and days_stale")
+        return self
+
+
+def _blocked_options_contract(
+    generated_at: datetime,
+    as_of: date | None,
+    days_stale: int | None,
+    warnings: list[str],
+) -> OptionsContractSnapshot:
+    return OptionsContractSnapshot(
+        schema_version=OPTIONS_SCHEMA_VERSION,
+        producer="ibkr-dashboard",
+        generated_at=generated_at,
+        as_of=as_of,
+        status="blocked",
+        days_stale=days_stale,
+        legs=[],
+        warnings=warnings,
+    )
+
+
+def options_contract_snapshot(
+    session: Session,
+    *,
+    now: datetime | None = None,
+    max_ready_age_days: int = MAX_READY_AGE_DAYS,
+) -> OptionsContractSnapshot:
+    """Open option legs as the versioned ``ibkr-dashboard.options.v1`` contract.
+
+    Same rows as ``options_open_positions`` (asset_class OPT, non-zero
+    quantity), but read from the latest EOD snapshot of ANY asset class and
+    aged by the ``ibkr-dashboard.portfolio.v1`` freshness rule. A book whose
+    options were all closed is therefore ``ready`` with no legs, never the last
+    day that still held options. Legs are summed by conid across accounts. No
+    account identifier, NAV, P&L, order or raw XML leaves this function.
+    """
+
+    generated_at = (now or datetime.now(UTC)).astimezone(UTC)
+    snapshot_date = session.scalar(select(func.max(PositionEod.snapshot_date)))
+    if snapshot_date is None:
+        return _blocked_options_contract(generated_at, None, None, ["NO_POSITION_SNAPSHOT"])
+    status, days_stale = freshness_status(
+        snapshot_date, generated_at.date(), max_ready_age_days
+    )
+    if status == "blocked":
+        return _blocked_options_contract(
+            generated_at, snapshot_date, days_stale, ["FUTURE_SNAPSHOT_DATE"]
+        )
+
+    rows = session.execute(
+        select(PositionEod, Instrument)
+        .join(Instrument, Instrument.conid == PositionEod.conid, isouter=True)
+        .where(
+            PositionEod.snapshot_date == snapshot_date,
+            PositionEod.asset_class == "OPT",
+            PositionEod.quantity != 0,
+        )
+    ).all()
+    warnings: list[str] = []
+
+    def warn(code: str) -> None:
+        if code not in warnings:
+            warnings.append(code)
+
+    if len({pos.account_id for pos, _instr in rows}) > 1:
+        warn("MULTIPLE_ACCOUNTS_AGGREGATED")
+
+    aggregated: dict[int, dict] = {}
+    for pos, instr in rows:
+        contract = _enrich_option(pos.symbol, instr)
+        currency = (pos.currency or (instr.currency if instr else None) or "").strip().upper()
+        raw_multiplier = pos.multiplier if pos.multiplier is not None else (
+            instr.multiplier if instr else None
+        )
+        if raw_multiplier is None:
+            # Same fallback as options_open_positions, but flagged.
+            raw_multiplier = Decimal(100)
+            warn("OPTION_MULTIPLIER_ASSUMED")
+        multiplier = Decimal(str(raw_multiplier))
+        if (
+            pos.conid < 1
+            or not contract.underlying
+            or contract.right not in ("P", "C")
+            or not contract.strike
+            or contract.strike <= 0
+            or contract.expiry is None
+            or len(currency) != 3
+            or not currency.isalpha()
+            or multiplier <= 0
+            or multiplier != multiplier.to_integral_value()
+        ):
+            warn("INVALID_OPTION_IDENTITY")
+            continue
+        quantity = Decimal(str(pos.quantity))
+        leg = aggregated.setdefault(
+            pos.conid,
+            {
+                "underlying": contract.underlying,
+                "right": contract.right,
+                "strike": contract.strike,
+                "expiry": contract.expiry,
+                "multiplier": int(multiplier),
+                "currency": currency,
+                "quantity": Decimal(0),
+                "abs_quantity": Decimal(0),
+                "cost_money": Decimal(0),
+                "cost_known": True,
+                "sides": set(),
+                "mark_price": None,
+            },
+        )
+        leg["quantity"] += quantity
+        leg["abs_quantity"] += abs(quantity)
+        leg["sides"].add(quantity > 0)
+        # IBKR costBasisMoney = this account's total open cost in the contract
+        # currency, commissions included, signed like the position (a short
+        # carries the credit as a negative number). Zero or absent = unknown.
+        if pos.cost_basis_money is None or pos.cost_basis_money == 0:
+            leg["cost_known"] = False
+        else:
+            leg["cost_money"] += abs(Decimal(str(pos.cost_basis_money)))
+        if leg["mark_price"] is None and pos.mark_price is not None:
+            leg["mark_price"] = float(pos.mark_price)
+
+    if "INVALID_OPTION_IDENTITY" in warnings:
+        # Mirrors INVALID_POSITION_IDENTITY in portfolio.v1: a partial book
+        # would read as "that leg is closed" to a consumer.
+        return _blocked_options_contract(generated_at, snapshot_date, days_stale, warnings)
+
+    legs: list[OptionsContractLeg] = []
+    for conid, leg in aggregated.items():
+        if leg["quantity"] == 0:
+            warn("LEGS_NETTED_TO_ZERO")
+            continue
+        avg_cost: float | None = None
+        if leg["cost_known"] and len(leg["sides"]) == 1:
+            # avg_cost_per_share = Σ|costBasisMoney| / (Σ|quantity| × multiplier):
+            # the open price per share in the contract currency, and summing
+            # money over |quantity| is the quantity-weighted mean across
+            # accounts. Not taken from the stored cost_basis_price: SUMMARY
+            # rows keep Flex costBasisPrice (per share) but LOT rows store
+            # costBasisMoney / quantity, which is per CONTRACT for options
+            # (flex/parser.py _aggregate_open_position_lots), so its scale
+            # depends on the Flex level of detail.
+            per_share = (
+                leg["cost_money"] / (leg["abs_quantity"] * leg["multiplier"])
+            ).quantize(Decimal("0.000001"))
+            avg_cost = float(per_share) if per_share > 0 else None
+        if avg_cost is None:
+            # Unknown, or long and short books mixed across accounts: no
+            # meaningful single open price, so it stays null.
+            warn("COST_BASIS_UNAVAILABLE")
+        legs.append(
+            OptionsContractLeg(
+                conid=conid,
+                underlying=leg["underlying"],
+                right=leg["right"],
+                strike=leg["strike"],
+                expiry=leg["expiry"],
+                multiplier=leg["multiplier"],
+                quantity=float(leg["quantity"]),
+                currency=leg["currency"],
+                avg_cost_per_share=avg_cost,
+                mark_price=leg["mark_price"],
+            )
+        )
+    legs.sort(key=lambda leg: (leg.underlying, leg.expiry, leg.right, leg.strike, leg.conid))
+
+    if not legs:
+        warn("NO_OPEN_OPTION_POSITIONS")
+    if status == "stale":
+        warn("STALE_POSITION_SNAPSHOT")
+
+    return OptionsContractSnapshot(
+        schema_version=OPTIONS_SCHEMA_VERSION,
+        producer="ibkr-dashboard",
+        generated_at=generated_at,
+        as_of=snapshot_date,
+        status=status,
+        days_stale=days_stale,
+        legs=legs,
+        warnings=warnings,
+    )
 
 
 def options_assignment_risk(
@@ -1048,7 +1275,13 @@ def options_assignment_rate(
     trade_q = (
         select(Trade, Instrument)
         .join(Instrument, Instrument.conid == Trade.conid, isouter=True)
-        .where(and_(Trade.asset_class == "OPT", is_closed_filter()))
+        .where(and_(
+            Trade.asset_class == "OPT",
+            is_closed_filter(),
+            # BookTrade Ex/A/Ep rows are the exchange-less close leg of an
+            # exercise/assignment/expiry: already counted from the EAE table.
+            or_(Trade.transaction_type.is_(None), Trade.transaction_type != "BookTrade"),
+        ))
     )
     trade_q = _apply_period(trade_q, Trade.trade_date, period)
     if account_id:
@@ -1114,15 +1347,20 @@ def options_pnl_attribution(
     overstates the options "edge."
 
     Decomposition:
-      * **short_premium_base** — sum of closed OPT trades' realized P&L
-      * **wheel_stock_base** — closed STK realized P&L on underlyings that
-        also have OPT activity (the assigned-stock side of the wheel)
+      * **short_premium_base** — closed OPT P&L of positions opened by a SELL
+        (closed by a BUY): the premium-selling edge
+      * **long_premium_base** — closed OPT P&L of positions opened by a BUY
+        (closed by a SELL): directional long options, not premium selling
+      * **wheel_stock_base** — closed STK realized P&L on shares that came from
+        option assignment/exercise (EAE stock legs, plus stock closed by an
+        assignment/exercise BookTrade). Sales are matched to the received shares
+        in date order, up to the received quantity; the rest is ordinary equity
       * **wheel_dividends_base** — net dividends (gross + withholding) on
         the same wheel underlyings
       * **wheel_withholding_base** — withholding-tax component of the above
         (surfaced separately so the user sees the drag)
-      * **non_options_stock_base** — closed STK realized P&L on underlyings
-        WITHOUT options activity (pure equity plays)
+      * **non_options_stock_base** — all other closed STK realized P&L
+        (pure equity plays, and shares not received through the wheel)
       * **non_options_dividends_base** — net dividends on those names
       * **interest_base** — interest received − interest paid (account-wide)
       * **grand_total_base** — sum of all components
@@ -1147,6 +1385,8 @@ def options_pnl_attribution(
         opt_q = opt_q.where(Trade.account_id == account_id)
 
     opt_pnl_by_und: dict[str, float] = {}
+    short_pnl_by_und: dict[str, float] = {}
+    long_pnl_by_und: dict[str, float] = {}
     for t, instr in session.execute(opt_q):
         c = _enrich_option(t.symbol, instr)
         und = c.underlying
@@ -1154,28 +1394,59 @@ def options_pnl_attribution(
             continue
         pnl = float(t.fifo_pnl_realized or 0) * float(t.fx_rate_to_base or 1)
         opt_pnl_by_und[und] = opt_pnl_by_und.get(und, 0.0) + pnl
+        # A BUY close ends a short (opened by SELL); a SELL close ends a long.
+        side_map = short_pnl_by_und if (t.buy_sell or "").upper() == "BUY" else long_pnl_by_und
+        side_map[und] = side_map.get(und, 0.0) + pnl
 
     wheel_underlyings = set(opt_pnl_by_und.keys())
 
-    # STK closed realized P&L by symbol, in base ccy. `open_close LIKE 'C%'`
-    # catches compound close codes observed in real exports, including C,
-    # C;IA, C;P, C;FP, C;FPA;P, and C;IM;P.
+    # STK closed realized P&L, in base ccy. `open_close LIKE 'C%'` catches
+    # compound close codes observed in real exports, including C, C;IA, C;P,
+    # C;FP, C;FPA;P, and C;IM;P. Rows are read over all history (the wheel share
+    # cap below runs in date order) and filtered to the period afterwards.
     stk_q = (
-        select(Trade.symbol, func.sum(
-            Trade.fifo_pnl_realized * func.coalesce(Trade.fx_rate_to_base, 1)
-        ).label("pnl_base"))
+        select(Trade)
         .where(and_(Trade.asset_class == "STK", is_closed_filter()))
-        .group_by(Trade.symbol)
+        .order_by(Trade.trade_datetime)
     )
-    stk_q = _apply_period(stk_q, Trade.trade_date, period)
     if account_id:
         stk_q = stk_q.where(Trade.account_id == account_id)
 
-    stk_pnl_by_sym: dict[str, float] = {}
-    for sym, pnl in session.execute(stk_q):
-        if not sym:
+    # Shares received through option assignment/exercise: the EAE stock legs
+    # ("Buy"/"Sell" rows whose symbol is the stock itself).
+    eae_q = select(OptionExerciseAssignment)
+    if account_id:
+        eae_q = eae_q.where(OptionExerciseAssignment.account_id == account_id)
+    wheel_shares_left: dict[str, float] = {}
+    for e in session.execute(eae_q).scalars():
+        # Only the shares received ("Buy" stock leg). Shares delivered on a call
+        # assignment close through their own assignment BookTrade row below.
+        if (e.transaction_type or "").lower() != "buy":
             continue
-        stk_pnl_by_sym[sym] = float(pnl or 0)
+        if e.symbol and e.symbol == e.underlying_symbol:
+            wheel_shares_left[e.symbol] = wheel_shares_left.get(e.symbol, 0.0) + abs(float(e.quantity or 0))
+
+    stk_pnl_by_sym: dict[str, float] = {}
+    wheel_stk_pnl_by_sym: dict[str, float] = {}
+    for t in session.execute(stk_q).scalars():
+        if not t.symbol:
+            continue
+        pnl = float(t.fifo_pnl_realized or 0) * float(t.fx_rate_to_base or 1)
+        qty = abs(float(t.quantity or 0))
+        if (t.transaction_type or "") == "BookTrade" and (t.notes or "") in ("A", "Ex", "Ep"):
+            wheel_part = pnl  # stock closed by an assignment/exercise itself
+        else:
+            left = wheel_shares_left.get(t.symbol, 0.0)
+            used = min(left, qty)
+            wheel_shares_left[t.symbol] = left - used
+            wheel_part = pnl * (used / qty) if qty else 0.0
+        in_period = (period is None or period.start is None or t.trade_date >= period.start) and (
+            period is None or period.end is None or t.trade_date <= period.end
+        )
+        if not in_period:
+            continue
+        stk_pnl_by_sym[t.symbol] = stk_pnl_by_sym.get(t.symbol, 0.0) + pnl
+        wheel_stk_pnl_by_sym[t.symbol] = wheel_stk_pnl_by_sym.get(t.symbol, 0.0) + wheel_part
 
     # Dividends + withholding by symbol, in base ccy. Net = gross + wht.
     # IBKR Flex usually leaves `CashTransaction.symbol` and `.conid` NULL on
@@ -1224,8 +1495,8 @@ def options_pnl_attribution(
         interest_base += float(amt or 0)
 
     # Roll up.
-    wheel_stock_base = sum(p for s, p in stk_pnl_by_sym.items() if s in wheel_underlyings)
-    non_options_stock_base = sum(p for s, p in stk_pnl_by_sym.items() if s not in wheel_underlyings)
+    wheel_stock_base = sum(wheel_stk_pnl_by_sym.values())
+    non_options_stock_base = sum(stk_pnl_by_sym.values()) - wheel_stock_base
 
     wheel_div_gross = sum(v for s, v in div_gross_by_sym.items() if s in wheel_underlyings)
     wheel_wht = sum(v for s, v in wht_by_sym.items() if s in wheel_underlyings)
@@ -1235,10 +1506,12 @@ def options_pnl_attribution(
     non_options_wht = sum(v for s, v in wht_by_sym.items() if s not in wheel_underlyings)
     non_options_dividends_base = non_options_div_gross + non_options_wht
 
-    short_premium_base = sum(opt_pnl_by_und.values())
+    short_premium_base = sum(short_pnl_by_und.values())
+    long_premium_base = sum(long_pnl_by_und.values())
 
     grand_total = (
         short_premium_base
+        + long_premium_base
         + wheel_stock_base
         + wheel_dividends_base
         + non_options_stock_base
@@ -1250,7 +1523,7 @@ def options_pnl_attribution(
     by_underlying = []
     for und in sorted(wheel_underlyings):
         opt_p = opt_pnl_by_und.get(und, 0.0)
-        stk_p = stk_pnl_by_sym.get(und, 0.0)
+        stk_p = wheel_stk_pnl_by_sym.get(und, 0.0)
         div_g = div_gross_by_sym.get(und, 0.0)
         wht_v = wht_by_sym.get(und, 0.0)
         div_net = div_g + wht_v
@@ -1258,6 +1531,8 @@ def options_pnl_attribution(
         by_underlying.append({
             "underlying": und,
             "opt_pnl_base": opt_p,
+            "short_premium_base": short_pnl_by_und.get(und, 0.0),
+            "long_premium_base": long_pnl_by_und.get(und, 0.0),
             "stk_pnl_base": stk_p,
             "dividends_gross_base": div_g,
             "withholding_base": wht_v,
@@ -1271,6 +1546,7 @@ def options_pnl_attribution(
         "by_underlying": by_underlying,
         "totals": {
             "short_premium_base": short_premium_base,
+            "long_premium_base": long_premium_base,
             "wheel_stock_base": wheel_stock_base,
             "wheel_dividends_base": wheel_dividends_base,
             "wheel_withholding_base": wheel_wht,
@@ -1304,13 +1580,17 @@ def options_summary(
 
 
 __all__ = [
+    "OPTIONS_SCHEMA_VERSION",
     "OptionContract",
+    "OptionsContractLeg",
+    "OptionsContractSnapshot",
     "enrich_option",
     "parse_occ_symbol",
     "parse_option_description",
     "options_assignment_rate",
     "options_assignment_risk",
     "options_concentration",
+    "options_contract_snapshot",
     "options_dte_buckets",
     "options_eae_list",
     "options_open_positions",

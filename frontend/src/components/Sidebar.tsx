@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import { useI18n } from '../lib/i18n';
 
-export type PageKey = 'resumen' | 'cartera' | 'operaciones' | 'opciones' | 'dividendos' | 'rentabilidad' | 'comisiones' | 'margen' | 'settings';
+export type PageKey = 'resumen' | 'cartera' | 'fiscal' | 'operaciones' | 'opciones' | 'dividendos' | 'rentabilidad' | 'comisiones' | 'margen' | 'integraciones' | 'settings';
 
 interface Props {
   active: PageKey;
@@ -9,6 +9,9 @@ interface Props {
   health: { ok: boolean; loading: boolean; error: boolean };
   flexHealthy: boolean;
   flexConfigured: boolean;
+  taxConfigured: boolean;
+  /** IB Gateway overlay level from /integrations/status (undefined while loading). */
+  liveOverlayLevel?: 'ok' | 'warn' | 'err' | 'off';
 }
 
 const Icon = {
@@ -73,6 +76,13 @@ const IconOperaciones = (
   </svg>
 );
 
+const IconFiscal = (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M6 2h9l3 3v17l-3-2-3 2-3-2-3 2V2Z" />
+    <path d="M9 8h6M9 12h6M9 16h3" />
+  </svg>
+);
+
 const IconOpciones = (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <path d="M3 12c0-4.97 4.03-9 9-9s9 4.03 9 9-4.03 9-9 9" />
@@ -81,19 +91,32 @@ const IconOpciones = (
   </svg>
 );
 
+const IconIntegraciones = (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M9 17H7A5 5 0 0 1 7 7h2" />
+    <path d="M15 7h2a5 5 0 0 1 0 10h-2" />
+    <path d="M8 12h8" />
+  </svg>
+);
+
 const NAV: Array<{ key: Exclude<PageKey, 'settings'>; labelKey: string; icon: ReactNode }> = [
   { key: 'resumen', labelKey: 'sidebar.nav.resumen', icon: Icon.dashboard },
   { key: 'cartera', labelKey: 'sidebar.nav.cartera', icon: Icon.cartera },
+  { key: 'fiscal', labelKey: 'sidebar.nav.fiscal', icon: IconFiscal },
   { key: 'operaciones', labelKey: 'sidebar.nav.operaciones', icon: IconOperaciones },
   { key: 'opciones', labelKey: 'sidebar.nav.opciones', icon: IconOpciones },
   { key: 'dividendos', labelKey: 'sidebar.nav.dividendos', icon: Icon.dividendos },
   { key: 'rentabilidad', labelKey: 'sidebar.nav.rentabilidad', icon: Icon.rentabilidad },
   { key: 'comisiones', labelKey: 'sidebar.nav.comisiones', icon: Icon.comisiones },
   { key: 'margen', labelKey: 'sidebar.nav.margen', icon: Icon.margen },
+  { key: 'integraciones', labelKey: 'sidebar.nav.integraciones', icon: IconIntegraciones },
 ];
 
-export function Sidebar({ active, onChange, health, flexHealthy, flexConfigured }: Props) {
+export function Sidebar({ active, onChange, health, flexHealthy, flexConfigured, taxConfigured, liveOverlayLevel = 'off' }: Props) {
   const { t } = useI18n();
+
+  // Hide the Fiscal tab until OptimizadorFiscal is configured.
+  const nav = NAV.filter((item) => item.key !== 'fiscal' || taxConfigured);
 
   return (
     <aside className="sidebar">
@@ -103,11 +126,13 @@ export function Sidebar({ active, onChange, health, flexHealthy, flexConfigured 
       </div>
 
       <nav className="sidebar-nav" aria-label={t('sidebar.mainNavigation')}>
-        {NAV.map((item) => (
+        {nav.map((item) => (
           <button
             key={item.key}
             type="button"
             className={`nav-item${active === item.key ? ' active' : ''}`}
+            data-testid={`nav-${item.key}`}
+            aria-current={active === item.key ? 'page' : undefined}
             onClick={() => onChange(item.key)}
           >
             <span className="nav-icon">{item.icon}</span>
@@ -130,12 +155,8 @@ export function Sidebar({ active, onChange, health, flexHealthy, flexConfigured 
             <span>Flex</span>
           </div>
           <div className="status-row" title={t('sidebar.statusTitle.ibgw')}>
-            <span className="status-dot off" />
+            <span className={`status-dot ${liveOverlayLevel}`} />
             <span>IBGW</span>
-          </div>
-          <div className="status-row" title={t('sidebar.statusTitle.cpg')}>
-            <span className="status-dot off" />
-            <span>CPG</span>
           </div>
         </div>
       </div>
@@ -144,6 +165,8 @@ export function Sidebar({ active, onChange, health, flexHealthy, flexConfigured 
         <button
           type="button"
           className={`nav-item${active === 'settings' ? ' active' : ''}`}
+          data-testid="nav-settings"
+          aria-current={active === 'settings' ? 'page' : undefined}
           onClick={() => onChange('settings')}
           title={t('sidebar.nav.settings')}
         >

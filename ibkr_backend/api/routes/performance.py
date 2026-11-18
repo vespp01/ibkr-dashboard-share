@@ -1,10 +1,11 @@
 """Performance — TWR + XIRR + external benchmark overlay.
 
-TWR matches IBKR PortfolioAnalyst's Time-Weighted Return; XIRR matches
-PortfolioAnalyst's Money-Weighted Return. The /benchmark route pulls SPX
-from Yahoo Finance (persisted in the `benchmark_daily` cache table) and
-re-denominates it into the requested base currency so the chart overlay is
-apples-to-apples with the CHF portfolio TWR.
+TWR is the chain of IBKR's own daily `ChangeInNAV.twr` (display currencies via
+the IBKR `fx_rates` table); XIRR is money-weighted over ChangeInNAV external
+flows (`depositsWithdrawals + assetTransfers`). The /benchmark route pulls the
+S&P 500 price index from Yahoo Finance (persisted in the `benchmark_daily`
+cache table) and re-denominates it with `fx_rates`, so the chart overlay shares
+the portfolio's FX source. See docs/methodology.md.
 """
 
 from __future__ import annotations
@@ -34,10 +35,17 @@ def twr(
     currency: str | None = Query(
         None,
         pattern="^(CHF|EUR|USD|GBP|JPY)$",
-        description="Display currency (e.g. EUR, USD). Converts NAV at historical spot rates to strip the CHF FX effect from the return.",
+        description="Display currency (e.g. EUR, USD). Converts the CHF daily returns with the IBKR fx_rates series (flagged fallback: Frankfurter).",
+    ),
+    summary: bool = Query(
+        False,
+        description="Omit the daily series: headline figures only (< 2 KB instead of ~100 KB).",
     ),
 ):
-    return twr_series(session, period=period, account_id=account_id, display_currency=currency)
+    return twr_series(
+        session, period=period, account_id=account_id,
+        display_currency=currency, summary=summary,
+    )
 
 
 @router.get("/xirr")
@@ -120,11 +128,10 @@ def vs_benchmark_route(
     ),
 ):
     """Portfolio TWR and S&P 500 overlaid on the SAME dates, both rebased to
-    100 on the first common day. Benchmark is sampled at the portfolio's own
-    NAV points, so a sparse pre-2026 stretch shows as straight segments in
-    BOTH lines instead of a smooth portfolio curve against a daily index.
-    Includes level comparison (full window) and risk comparison (beta, alpha,
-    tracking error, information ratio) over the dense daily segment.
+    100 on the NAV day before the window (`base_date`). Returns are compounded
+    between common dates, so no portfolio day is dropped. Includes the level
+    comparison and the risk comparison (beta, alpha, tracking error,
+    information ratio) derived from the same paired returns.
     """
     return vs_benchmark(
         session, period=period, account_id=account_id,
@@ -140,11 +147,14 @@ def risk(
     session: SessionDep,
     period: PeriodDep,
     account_id: str | None = Query(None),
-    risk_free_rate_pct: float = Query(
-        0.0,
+    risk_free_rate_pct: float | None = Query(
+        None,
         ge=0.0,
         le=20.0,
-        description="Annual risk-free rate as percentage (CHF SARON ~0.95 % in early 2026)",
+        description=(
+            "Annual risk-free rate in %. Omit to use the per-year CHF table "
+            "(env RISK_FREE_CHF_PCT_BY_YEAR, default 0 %)."
+        ),
     ),
 ):
     return risk_metrics(

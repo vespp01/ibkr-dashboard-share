@@ -1,24 +1,24 @@
 import { test, expect, type Page } from '@playwright/test';
 
-// VISION R4 smoke: the dashboard shell loads and all 8 sidebar tabs render
+// Smoke: the dashboard shell loads and all sidebar tabs render
 // without a runtime error / blank screen. Runs against a live stack with data.
 //
 // Keep this smoke deterministic regardless of the browser host locale.
-const TABS = [
-  'Dashboard',
-  'Portfolio',
-  'Trades',
-  'Options',
-  'Dividends',
-  'Performance',
-  'Fees',
-  'Margin',
+// Nav keys shown while Fiscal is not configured (it is hidden until /tax/scenarios
+// reports a configured integration). Each button carries data-testid="nav-<key>".
+const TAB_KEYS = [
+  'resumen',
+  'cartera',
+  'operaciones',
+  'opciones',
+  'dividendos',
+  'rentabilidad',
+  'comisiones',
+  'margen',
+  'integraciones',
 ] as const;
 
-// Scope to the sidebar nav so we don't match in-content buttons (e.g. the
-// "Operaciones" sub-tab inside OptionsPanel).
-const navItem = (page: Page, label: string) =>
-  page.locator('.sidebar-nav button.nav-item', { hasText: label });
+const navItem = (page: Page, key: string) => page.getByTestId(`nav-${key}`);
 
 async function loadSmokeApp(page: Page) {
   await page.addInitScript(() => {
@@ -42,11 +42,13 @@ test.describe('Dashboard smoke (R4)', () => {
     await expect(page.locator('.sidebar-brand')).toContainText('IBKR Dashboard');
     await expect(
       page.locator('.sidebar-nav button.nav-item'),
-    ).toHaveCount(TABS.length);
+    ).toHaveCount(TAB_KEYS.length);
+    // Fiscal stays hidden while the tax integration is not configured.
+    await expect(navItem(page, 'fiscal')).toHaveCount(0);
     expect(errors, `runtime errors: ${errors.join('; ')}`).toHaveLength(0);
   });
 
-  for (const label of TABS) {
+  for (const label of TAB_KEYS) {
     test(`tab "${label}" renders without runtime error`, async ({ page }) => {
       const errors = trackPageErrors(page);
       await loadSmokeApp(page);

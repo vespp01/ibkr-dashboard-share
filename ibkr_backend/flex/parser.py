@@ -28,6 +28,20 @@ def _dec(v: str | None) -> Decimal | None:
         return None
 
 
+def _first_dec(el: ET.Element, *names: str) -> Decimal | None:
+    """First attribute in `names` that parses to a Decimal, zero included.
+
+    `_dec(a) or _dec(b)` treats a legitimate 0 as "missing" and falls through
+    to the next name (or None). Use this wherever an attribute can alias
+    another (B37).
+    """
+    for name in names:
+        value = _dec(el.get(name))
+        if value is not None:
+            return value
+    return None
+
+
 def _int(v: str | None) -> int | None:
     if v is None or v == "":
         return None
@@ -260,6 +274,7 @@ class InterestAccrual:
     interest_type: str | None
     interest: Decimal | None
     ending_balance: Decimal | None
+    raw: str = ""
 
 
 @dataclass(slots=True)
@@ -274,6 +289,7 @@ class TransactionFee:
     tax_amount: Decimal
     tax_description: str | None
     currency: str | None
+    raw: str = ""
 
 
 @dataclass(slots=True)
@@ -299,27 +315,8 @@ class ChangeInNavRow:
     fx_translation: Decimal | None
     twr: Decimal | None
     raw: str = ""
-
-
-@dataclass(slots=True)
-class MtdYtdPerformanceRow:
-    snapshot_date: date
-    account_id: str
-    conid: int
-    symbol: str | None
-    asset_class: str | None
-    mtm_mtd: Decimal | None
-    mtm_ytd: Decimal | None
-    realized_mtd: Decimal | None
-    realized_ytd: Decimal | None
-    unrealized_mtd: Decimal | None
-    unrealized_ytd: Decimal | None
-    fifo_mtd: Decimal | None
-    fifo_ytd: Decimal | None
-    other_mtd: Decimal | None
-    other_ytd: Decimal | None
-    total_mtd: Decimal | None
-    total_ytd: Decimal | None
+    asset_transfers: Decimal | None = None
+    sales_tax: Decimal | None = None
 
 
 @dataclass(slots=True)
@@ -477,7 +474,6 @@ class ParsedStatement:
     interest_accruals: list[InterestAccrual] = field(default_factory=list)
     transaction_fees: list[TransactionFee] = field(default_factory=list)
     change_in_nav: list[ChangeInNavRow] = field(default_factory=list)
-    mtd_ytd_performance: list[MtdYtdPerformanceRow] = field(default_factory=list)
     fifo_performance: list[FifoPerformanceRow] = field(default_factory=list)
     mtm_performance: list[MtmPerformanceRow] = field(default_factory=list)
     trade_confirms: list[TradeConfirmRow] = field(default_factory=list)
@@ -540,9 +536,6 @@ def _parse_statement(stmt: ET.Element) -> ParsedStatement:
     parsed.interest_accruals = list(_parse_interest_accruals(stmt, account_id))
     parsed.transaction_fees = list(_parse_transaction_fees(stmt, account_id))
     parsed.change_in_nav = list(_parse_change_in_nav(stmt, account_id))
-    parsed.mtd_ytd_performance = list(
-        _parse_mtd_ytd_performance(stmt, account_id, parsed.to_date or parsed.from_date)
-    )
     parsed.fifo_performance = list(_parse_fifo_performance(stmt, account_id))
     parsed.mtm_performance = list(_parse_mtm_performance(stmt, account_id))
     parsed.trade_confirms = list(_parse_trade_confirms(stmt, account_id))
@@ -822,6 +815,12 @@ def _parse_corporate_actions(
     stmt: ET.Element, account_id: str
 ) -> Iterable[CorporateAction]:
     for el in _iter(stmt, "CorporateActions", "CorporateAction"):
+        # Flex emits each event twice: a SUMMARY roll-up and the DETAIL row.
+        # Keep DETAIL only (B59); a row without levelOfDetail (older query
+        # layouts) is kept as-is.
+        level = (el.get("levelOfDetail") or "").strip().upper()
+        if level and level != "DETAIL":
+            continue
         dt = _dt(el.get("dateTime") or el.get("reportDate"))
         if dt is None:
             continue
@@ -868,10 +867,7 @@ def _parse_cash_report(
             ending_settled_cash=_dec(el.get("endingSettledCash")),
             dividends=_dec(el.get("dividends")),
             withholding_tax=_dec(el.get("withholdingTax")),
-            broker_interest=(
-                _dec(el.get("brokerInterest"))
-                or _dec(el.get("brokerInterestPaid"))
-            ),
+            broker_interest=_first_dec(el, "brokerInterest", "brokerInterestPaid"),
             commissions=_dec(el.get("commissions")),
             fees_receivables=_dec(el.get("feesReceivables")),
             # IBKR's CashReportCurrency exposes a combined `depositsWithdrawals`
@@ -879,10 +875,8 @@ def _parse_cash_report(
             # legacy names. Prefer the net, fall back to deposits, then
             # withdrawals. Previous logic dropped the combined field entirely
             # and short-circuited at the first non-zero deposit row.
-            deposits_withdrawals=(
-                _dec(el.get("depositsWithdrawals"))
-                or _dec(el.get("deposits"))
-                or _dec(el.get("withdrawals"))
+            deposits_withdrawals=_first_dec(
+                el, "depositsWithdrawals", "deposits", "withdrawals"
             ),
         )
 
@@ -984,9 +978,13 @@ def _parse_interest_accruals(
             account_id=el.get("accountId") or account_id,
             accrual_date=d,
             currency=cur,
-            interest_type=_str(el.get("interestType")),
-            interest=_dec(el.get("interest")),
+            # Flex sends `interestAccrued` (+ `accrualReversal`, `fxTranslation`
+            # in raw_xml); `interest` is the pre-2026 spelling (B34). The row
+            # key is (account, day, currency), so interest_type stays NULL.
+            interest_type=None,
+            interest=_first_dec(el, "interestAccrued", "interest"),
             ending_balance=_dec(el.get("endingAccrualBalance")),
+            raw=_row_xml(el),
         )
 
 
@@ -1004,15 +1002,18 @@ def _parse_transaction_fees(
                 continue
             yield TransactionFee(
                 account_id=el.get("accountId") or account_id,
-                trade_id=_str(el.get("tradeID")),
+                # IBKR spells the id `tradeId` on this section (B35); keep the
+                # `tradeID` spelling of the other sections as a fallback.
+                trade_id=_str(el.get("tradeId") or el.get("tradeID")),
                 symbol=_str(el.get("symbol")),
                 conid=_int(el.get("conid")),
-                event_datetime=_dt(el.get("dateTime")),
+                event_datetime=_dt(el.get("dateTime") or el.get("date")),
                 report_date=_date(el.get("reportDate")),
                 quantity=_dec(el.get("quantity")),
                 tax_amount=amount,
                 tax_description=_str(el.get("taxDescription") or el.get("description")),
                 currency=_str(el.get("currency")),
+                raw=_row_xml(el),
             )
 
 
@@ -1051,56 +1052,8 @@ def _parse_change_in_nav(
             fx_translation=_dec(el.get("fxTranslation")),
             twr=_dec(el.get("twr")),
             raw=_row_xml(el),
-        )
-
-
-def _parse_mtd_ytd_performance(
-    stmt: ET.Element, account_id: str, statement_date: date | None
-) -> Iterable[MtdYtdPerformanceRow]:
-    """`<MTDYTDPerformanceSummary>` wrapper holds per-symbol rows of type
-    `<MTDYTDPerformanceSummaryUnderlying>` (base currency). Rows do NOT carry
-    their own date — it comes from the parent FlexStatement's `toDate`.
-
-    Attribute schema (observed 2026-05-14):
-        mtmMTD / mtmYTD                  → MTM PnL month/year-to-date
-        realizedPnlMTD / realizedPnlYTD  → total realized PnL
-        realSTMTD / realSTYTD            → short-term realized (split out)
-        realLTMTD / realLTYTD            → long-term realized (split out)
-    """
-    if statement_date is None:
-        return
-    for el in _iter(stmt, "MTDYTDPerformanceSummary", "MTDYTDPerformanceSummaryUnderlying"):
-        cid = _int(el.get("conid"))
-        if cid is None:
-            continue
-        # `realized*` is the canonical total; ST + LT are the breakdown.
-        realized_mtd = _dec(el.get("realizedPnlMTD"))
-        realized_ytd = _dec(el.get("realizedPnlYTD"))
-        # Surface ST + LT under the existing `fifo_mtd/ytd` columns so we keep
-        # the short/long-term split available without a schema migration.
-        st_mtd = _dec(el.get("realSTMTD"))
-        lt_mtd = _dec(el.get("realLTMTD"))
-        st_ytd = _dec(el.get("realSTYTD"))
-        lt_ytd = _dec(el.get("realLTYTD"))
-
-        yield MtdYtdPerformanceRow(
-            snapshot_date=statement_date,
-            account_id=el.get("accountId") or account_id,
-            conid=cid,
-            symbol=_str(el.get("symbol")),
-            asset_class=_str(el.get("assetCategory")),
-            mtm_mtd=_dec(el.get("mtmMTD")),
-            mtm_ytd=_dec(el.get("mtmYTD")),
-            realized_mtd=realized_mtd,
-            realized_ytd=realized_ytd,
-            unrealized_mtd=None,
-            unrealized_ytd=None,
-            fifo_mtd=st_mtd,
-            fifo_ytd=st_ytd,
-            other_mtd=lt_mtd,
-            other_ytd=lt_ytd,
-            total_mtd=(realized_mtd or Decimal(0)) + (_dec(el.get("mtmMTD")) or Decimal(0)),
-            total_ytd=(realized_ytd or Decimal(0)) + (_dec(el.get("mtmYTD")) or Decimal(0)),
+            asset_transfers=_dec(el.get("assetTransfers")),
+            sales_tax=_dec(el.get("salesTax")),
         )
 
 

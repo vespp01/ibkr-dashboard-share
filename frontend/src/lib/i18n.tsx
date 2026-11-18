@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { PRIVACY_MODE_STORAGE_KEY } from './format';
+import { PRIVACY_MODE_STORAGE_KEY, setFormatLocale, setPrivacyModeFlag } from './format';
 
 export type Language = 'es' | 'en' | 'de';
 
@@ -22,6 +22,8 @@ export const LANGUAGE_OPTIONS: Array<{ value: Language; nativeLabel: string; eng
 const messages = {
   es: {
     common: {
+      loadError: 'No se pudo cargar',
+      retry: 'Reintentar',
       all: 'Todo',
       api: 'API',
       backend: 'backend',
@@ -57,6 +59,8 @@ const messages = {
     },
     periods: {
       all: 'Todo',
+      mtd: 'MTD',
+      qtd: 'QTD',
       ytd: 'YTD',
       oneYear: '1A',
       threeYears: '3A',
@@ -70,17 +74,18 @@ const messages = {
         api: 'FastAPI backend',
         flex: 'Flex Web Service',
         ibgw: 'IB Gateway',
-        cpg: 'Client Portal Gateway',
       },
       nav: {
         resumen: 'Dashboard',
         cartera: 'Cartera',
+        fiscal: 'Fiscal',
         operaciones: 'Operaciones',
         opciones: 'Opciones',
         dividendos: 'Dividendos',
         rentabilidad: 'Rentabilidad',
         comisiones: 'Comisiones',
         margen: 'Margen',
+        integraciones: 'Integraciones',
         settings: 'Settings',
       },
     },
@@ -92,6 +97,10 @@ const messages = {
       cartera: {
         title: 'Cartera',
         subtitle: 'Posiciones actuales, distribución y P&L latente por símbolo.',
+      },
+      fiscal: {
+        title: 'Fiscal',
+        subtitle: 'Escenarios fiscales españoles auditables, siempre sujetos a revisión humana.',
       },
       operaciones: {
         title: 'Operaciones',
@@ -117,6 +126,10 @@ const messages = {
         title: 'Margen',
         subtitle: 'Leverage, cash debt por divisa, concentración, Reg-T e intereses pagados.',
       },
+      integraciones: {
+        title: 'Integraciones',
+        subtitle: 'Estado y control de las conexiones con tus proyectos, el broker y servicios externos.',
+      },
       settings: {
         title: 'Settings',
         subtitle: 'Idioma, privacidad local y checklist de conexión a IBKR.',
@@ -124,6 +137,11 @@ const messages = {
     },
     dashboard: {
       staleWarning: 'Datos sin actualizar hace más de 30 días. Último dato: hace {days} días. Ejecuta un pull de Flex para refrescar.',
+      staleData: 'Los datos no avanzan: el último dato es del {date} ({days} días hábiles). Los pulls pueden seguir saliendo bien; revisa el periodo de la query Activity en el Client Portal.',
+      stalePull: 'No hay un pull de Flex correcto desde hace {hours} h. Revisa el token o el scheduler.',
+      pageErrorTitle: 'Esta página no se pudo mostrar',
+      pageErrorBody: 'Un dato inesperado rompió el render. El resto del dashboard sigue funcionando.',
+      retry: 'Reintentar',
       footerAdvice: 'Los datos mostrados son históricos y no constituyen asesoramiento financiero.',
       footerTwr: 'TWR = Time-Weighted Return (mide la rentabilidad de la cartera aislando aportes y retiradas).',
       asOf: 'a {date}',
@@ -156,12 +174,12 @@ const messages = {
       steps: {
         token: 'IBKR Client Portal -> Performance & Reports -> Flex Queries -> Flex Web Service -> Generate Token.',
         env: 'Copia .env.example a .env y rellena IB_FLEX_TOKEN, IB_FLEX_TOKEN_EXPIRY e IB_FLEX_QUERY_ID.',
-        activity: 'Activity Flex Query: nombre dashboard_full_daily, formato XML, periodo Year to Date y todas las secciones/columnas requeridas.',
+        activity: 'Activity Flex Query: nombre dashboard_full_daily, formato XML, periodo Last 30 Calendar Days y todas las secciones/columnas requeridas.',
         tc: 'Trade Confirmation Flex Query: nombre dashboard_tc_daily, formato XML y todos los campos de Trade Confirms. Rellena IB_FLEX_QUERY_ID_TC si la usas.',
         start: 'Ejecuta Docker Compose, luego el bootstrap una vez para cargar el histórico inicial.',
       },
       requiredSections: 'Secciones clave Activity Flex',
-      sections: 'Account Information, NAV in Base, Change in NAV, Cash Report, Open Positions, Trades, Cash Transactions, Dividend Accruals, Interest Accruals, Conversion Rates, FIFO/MTM Performance, Transaction Taxes, Corporate Actions, Transfers.',
+      sections: 'Account Information, NAV in Base, Change in NAV, MTD/YTD Performance Summary, Cash Report, Open Positions, Trades, Cash Transactions, Dividend Accruals, Interest Accruals, Conversion Rates, Securities Info, FIFO/MTM Performance, Transaction Taxes, Corporate Actions, Option Exercises, Assignments, Expirations, Transfers.',
       healthTitle: 'Comprobaciones rápidas',
       setupStatusTitle: 'Estado real del setup',
       setupStatusDescription: 'Lectura no secreta del backend para saber si Flex, TC y la base local están listos.',
@@ -184,19 +202,59 @@ const messages = {
         api: 'API: http://localhost:8001/health',
         swagger: 'Swagger: http://localhost:8001/docs',
       },
+      notifications: {
+        title: 'Notificaciones de Telegram',
+        description: 'Configura qué mensajes envía el bot, su contenido y su frecuencia. Se aplica al instante.',
+        loading: 'Cargando configuración…',
+        telegramOn: 'Telegram conectado',
+        telegramOff: 'Telegram sin configurar',
+        telegramHint: 'Define TELEGRAM_BOT_TOKEN y TELEGRAM_CHAT_ID en .env para que se envíen los mensajes.',
+        on: 'Sí',
+        off: 'No',
+        frequency: 'Frecuencia',
+        weekday: 'Día',
+        dayOfMonth: 'Día del mes',
+        time: 'Hora',
+        sections: 'Contenido',
+        alertBands: 'Avisar también al cruzar umbrales de riesgo',
+        interval: 'Intervalo',
+        requiresOverlayOff: 'Desactivado: requiere el live overlay (ENABLE_LIVE_OVERLAY=false)',
+        weekdaysShort: 'L,M,X,J,V,S,D',
+        save: 'Guardar',
+        saving: 'Guardando…',
+        saved: 'Guardado',
+        saveError: 'Error al guardar',
+        sendTest: 'Enviar prueba',
+        testing: 'Enviando…',
+        testSent: 'Prueba enviada',
+        testFailed: 'Fallo al enviar',
+        freq: { off: 'Off', daily: 'Diario', weekly: 'Semanal', biweekly: 'Quincenal', monthly: 'Mensual' },
+        section: { dividends: 'Dividendos', operations: 'Operaciones', commissions: 'Comisiones' },
+        msg: {
+          daily_digest: { name: 'Resumen diario', help: 'Dividendos, operaciones y comisiones tras cada pull.' },
+          performance_pulse: { name: 'Pulso de cartera', help: 'Rentabilidad MTD/YTD vs S&P 500 y APR de margen.' },
+          token_expiry: { name: 'Caducidad token Flex', help: 'Aviso cuando el token Flex está por caducar.' },
+          margin_eod: { name: 'Alerta de margen (EOD)', help: 'Estimación Reg-T de Flex al cierre; avisa al cruzar umbrales.' },
+          margin_usage: { name: 'Uso de margen', help: 'Cuánto margen usas, a qué distancia del límite recomendado y qué % del patrimonio está en caja.' },
+          staleness: { name: 'Pipeline sin actualizar', help: 'Avisa si el último pull es demasiado antiguo.' },
+          price_alerts: { name: 'Alertas de precio', help: 'Cruces de umbral por regla (necesita TWS/live).' },
+          margin_live: { name: 'Margen en tiempo real', help: 'Riesgo de margen en directo de IBKR (necesita TWS/live).' },
+          margin_fx: { name: 'Coste de margen por divisa', help: 'Revisión de la divisa más barata para la deuda de margen.' },
+        },
+      },
     },
     dashboardCards: {
       accountSummary: {
         title: 'Resumen de cuenta',
-        description: 'NAV, cushion, buying power y excess liquidity.',
+        description: 'NAV, TWR del periodo, retorno all-time e ingresos netos 12 m.',
+      },
+      riskStrip: {
+        title: 'Franja de riesgo',
+        description: 'Cushion, excess liquidity y leverage (estimación Reg-T) más liquidez (cash / NLV) con enlace a Margen.',
       },
       tradingQuality: {
-        title: 'Trading Quality',
-        description: 'Profit factor, win rate, expectancy, payoff, drawdown y Sharpe de P&L realizado.',
-      },
-      pnlAttribution: {
-        title: 'Atribución de P&L',
-        description: 'Desglose de realized, MTM, dividendos, intereses, comisiones, impuestos y FX.',
+        title: 'Calidad de trading',
+        description: 'Profit factor, tasa de acierto, expectativa, payoff, Sharpe y drawdown sobre NAV. Plegado por defecto.',
       },
       tradeCalendar: {
         title: 'Calendario',
@@ -206,13 +264,9 @@ const messages = {
         title: 'Actividad del mes',
         description: 'Tickers operados, crédito abierto y profit factor mensual.',
       },
-      coreKpis: {
-        title: 'KPIs de contexto',
-        description: 'TWR, dividendos, PADI, yield, P&L no realizado y posiciones.',
-      },
       allTimeReturn: {
         title: 'Retorno total',
-        description: 'NAV menos aportes netos desde el inicio.',
+        description: 'NAV menos aportes netos desde el inicio. Plegado por defecto.',
       },
       realizedMonthly: {
         title: 'Matriz realized mensual',
@@ -226,6 +280,8 @@ const messages = {
   },
   en: {
     common: {
+      loadError: 'Could not load',
+      retry: 'Retry',
       all: 'All',
       api: 'API',
       backend: 'backend',
@@ -261,6 +317,8 @@ const messages = {
     },
     periods: {
       all: 'All',
+      mtd: 'MTD',
+      qtd: 'QTD',
       ytd: 'YTD',
       oneYear: '1Y',
       threeYears: '3Y',
@@ -274,17 +332,18 @@ const messages = {
         api: 'FastAPI backend',
         flex: 'Flex Web Service',
         ibgw: 'IB Gateway',
-        cpg: 'Client Portal Gateway',
       },
       nav: {
         resumen: 'Dashboard',
         cartera: 'Portfolio',
+        fiscal: 'Tax',
         operaciones: 'Trades',
         opciones: 'Options',
         dividendos: 'Dividends',
         rentabilidad: 'Performance',
         comisiones: 'Fees',
         margen: 'Margin',
+        integraciones: 'Integrations',
         settings: 'Settings',
       },
     },
@@ -296,6 +355,10 @@ const messages = {
       cartera: {
         title: 'Portfolio',
         subtitle: 'Current positions, allocation, and unrealized P&L by symbol.',
+      },
+      fiscal: {
+        title: 'Tax',
+        subtitle: 'Auditable Spanish tax scenarios, always subject to human review.',
       },
       operaciones: {
         title: 'Trades',
@@ -321,6 +384,10 @@ const messages = {
         title: 'Margin',
         subtitle: 'Leverage, cash debt by currency, concentration, Reg-T estimates, and interest paid.',
       },
+      integraciones: {
+        title: 'Integrations',
+        subtitle: 'Status and control of the links to your projects, the broker, and external services.',
+      },
       settings: {
         title: 'Settings',
         subtitle: 'Language, local privacy, and IBKR connection checklist.',
@@ -328,6 +395,11 @@ const messages = {
     },
     dashboard: {
       staleWarning: 'Data has not updated for more than 30 days. Last data point: {days} days ago. Run a Flex pull to refresh.',
+      staleData: 'Data is not advancing: the latest data point is {date} ({days} business days). Pulls can still succeed; check the Activity query period in the Client Portal.',
+      stalePull: 'No successful Flex pull for {hours} h. Check the token or the scheduler.',
+      pageErrorTitle: 'This page could not be shown',
+      pageErrorBody: 'An unexpected value broke the render. The rest of the dashboard still works.',
+      retry: 'Retry',
       footerAdvice: 'The displayed data is historical and is not financial advice.',
       footerTwr: 'TWR = Time-Weighted Return, measuring portfolio performance while isolating deposits and withdrawals.',
       asOf: 'as of {date}',
@@ -360,12 +432,12 @@ const messages = {
       steps: {
         token: 'IBKR Client Portal -> Performance & Reports -> Flex Queries -> Flex Web Service -> Generate Token.',
         env: 'Copy .env.example to .env and fill IB_FLEX_TOKEN, IB_FLEX_TOKEN_EXPIRY, and IB_FLEX_QUERY_ID.',
-        activity: 'Activity Flex Query: name dashboard_full_daily, XML format, Year to Date period, and all required sections/columns.',
+        activity: 'Activity Flex Query: name dashboard_full_daily, XML format, Last 30 Calendar Days period, and all required sections/columns.',
         tc: 'Trade Confirmation Flex Query: name dashboard_tc_daily, XML format, and every Trade Confirms field. Fill IB_FLEX_QUERY_ID_TC if you use it.',
         start: 'Run Docker Compose, then bootstrap once to load the initial history.',
       },
       requiredSections: 'Key Activity Flex sections',
-      sections: 'Account Information, NAV in Base, Change in NAV, Cash Report, Open Positions, Trades, Cash Transactions, Dividend Accruals, Interest Accruals, Conversion Rates, FIFO/MTM Performance, Transaction Taxes, Corporate Actions, Transfers.',
+      sections: 'Account Information, NAV in Base, Change in NAV, MTD/YTD Performance Summary, Cash Report, Open Positions, Trades, Cash Transactions, Dividend Accruals, Interest Accruals, Conversion Rates, Securities Info, FIFO/MTM Performance, Transaction Taxes, Corporate Actions, Option Exercises, Assignments, Expirations, Transfers.',
       healthTitle: 'Quick checks',
       setupStatusTitle: 'Real setup status',
       setupStatusDescription: 'Non-secret backend status for Flex, TC, and the local database.',
@@ -388,19 +460,59 @@ const messages = {
         api: 'API: http://localhost:8001/health',
         swagger: 'Swagger: http://localhost:8001/docs',
       },
+      notifications: {
+        title: 'Telegram notifications',
+        description: 'Choose which messages the bot sends, their content and frequency. Applied instantly.',
+        loading: 'Loading configuration…',
+        telegramOn: 'Telegram connected',
+        telegramOff: 'Telegram not configured',
+        telegramHint: 'Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env so messages are delivered.',
+        on: 'On',
+        off: 'Off',
+        frequency: 'Frequency',
+        weekday: 'Day',
+        dayOfMonth: 'Day of month',
+        time: 'Time',
+        sections: 'Content',
+        alertBands: 'Also alert on risk-threshold crossings',
+        interval: 'Interval',
+        requiresOverlayOff: 'Disabled: needs the live overlay (ENABLE_LIVE_OVERLAY=false)',
+        weekdaysShort: 'Mo,Tu,We,Th,Fr,Sa,Su',
+        save: 'Save',
+        saving: 'Saving…',
+        saved: 'Saved',
+        saveError: 'Save failed',
+        sendTest: 'Send test',
+        testing: 'Sending…',
+        testSent: 'Test sent',
+        testFailed: 'Send failed',
+        freq: { off: 'Off', daily: 'Daily', weekly: 'Weekly', biweekly: 'Biweekly', monthly: 'Monthly' },
+        section: { dividends: 'Dividends', operations: 'Operations', commissions: 'Commissions' },
+        msg: {
+          daily_digest: { name: 'Daily digest', help: 'Dividends, operations and commissions after each pull.' },
+          performance_pulse: { name: 'Portfolio pulse', help: 'MTD/YTD return vs S&P 500 and margin APR.' },
+          token_expiry: { name: 'Flex token expiry', help: 'Warns when the Flex token is about to expire.' },
+          margin_eod: { name: 'Margin alert (EOD)', help: 'Reg-T estimate from Flex at close; alerts on threshold crossings.' },
+          margin_usage: { name: 'Margin usage', help: 'How much margin you use, how close to the recommended limit, and what % of NLV is cash.' },
+          staleness: { name: 'Pipeline stale', help: 'Warns if the last pull is too old.' },
+          price_alerts: { name: 'Price alerts', help: 'Per-rule threshold crossings (needs TWS/live).' },
+          margin_live: { name: 'Live margin', help: 'Live IBKR margin risk (needs TWS/live).' },
+          margin_fx: { name: 'Margin cost by currency', help: 'Reviews the cheapest currency for the margin debt.' },
+        },
+      },
     },
     dashboardCards: {
       accountSummary: {
         title: 'Account summary',
-        description: 'NAV, cushion, buying power, and excess liquidity.',
+        description: 'NAV, period TWR, all-time return and 12-month net income.',
+      },
+      riskStrip: {
+        title: 'Risk strip',
+        description: 'Cushion, excess liquidity and leverage (Reg-T estimate) plus liquidity (cash / NLV) with a link to Margin.',
       },
       tradingQuality: {
-        title: 'Trading Quality',
-        description: 'Profit factor, win rate, expectancy, payoff, drawdown, and realized-P&L Sharpe.',
-      },
-      pnlAttribution: {
-        title: 'P&L attribution',
-        description: 'Breakdown of realized, MTM, dividends, interest, fees, taxes, and FX.',
+        title: 'Trading quality',
+        description: 'Profit factor, win rate, expectancy, payoff, Sharpe and drawdown on NAV. Collapsed by default.',
       },
       tradeCalendar: {
         title: 'Calendar',
@@ -410,13 +522,9 @@ const messages = {
         title: 'Monthly activity',
         description: 'Traded tickers, open credit, and monthly profit factor.',
       },
-      coreKpis: {
-        title: 'Context KPIs',
-        description: 'TWR, dividends, PADI, yield, unrealized P&L, and positions.',
-      },
       allTimeReturn: {
-        title: 'Total return',
-        description: 'NAV minus cumulative net deposits since inception.',
+        title: 'All-time return',
+        description: 'NAV minus net deposits since inception. Collapsed by default.',
       },
       realizedMonthly: {
         title: 'Monthly realized matrix',
@@ -430,6 +538,8 @@ const messages = {
   },
   de: {
     common: {
+      loadError: 'Konnte nicht geladen werden:',
+      retry: 'Erneut versuchen',
       all: 'Alle',
       api: 'API',
       backend: 'Backend',
@@ -465,6 +575,8 @@ const messages = {
     },
     periods: {
       all: 'Alle',
+      mtd: 'MTD',
+      qtd: 'QTD',
       ytd: 'YTD',
       oneYear: '1J',
       threeYears: '3J',
@@ -478,17 +590,18 @@ const messages = {
         api: 'FastAPI Backend',
         flex: 'Flex Web Service',
         ibgw: 'IB Gateway',
-        cpg: 'Client Portal Gateway',
       },
       nav: {
         resumen: 'Dashboard',
         cartera: 'Portfolio',
+        fiscal: 'Steuern',
         operaciones: 'Trades',
         opciones: 'Optionen',
         dividendos: 'Dividenden',
         rentabilidad: 'Performance',
         comisiones: 'Gebuehren',
         margen: 'Margin',
+        integraciones: 'Integrationen',
         settings: 'Einstellungen',
       },
     },
@@ -500,6 +613,10 @@ const messages = {
       cartera: {
         title: 'Portfolio',
         subtitle: 'Aktuelle Positionen, Allokation und unrealisierter P&L nach Symbol.',
+      },
+      fiscal: {
+        title: 'Steuern',
+        subtitle: 'Pruefbare spanische Steuerszenarien, immer mit menschlicher Kontrolle.',
       },
       operaciones: {
         title: 'Trades',
@@ -525,6 +642,10 @@ const messages = {
         title: 'Margin',
         subtitle: 'Leverage, Cash Debt je Waehrung, Konzentration, Reg-T und gezahlte Zinsen.',
       },
+      integraciones: {
+        title: 'Integrationen',
+        subtitle: 'Status und Steuerung der Verbindungen zu deinen Projekten, dem Broker und externen Diensten.',
+      },
       settings: {
         title: 'Einstellungen',
         subtitle: 'Sprache, lokale Privatsphaere und IBKR-Verbindungscheckliste.',
@@ -532,6 +653,11 @@ const messages = {
     },
     dashboard: {
       staleWarning: 'Die Daten wurden seit mehr als 30 Tagen nicht aktualisiert. Letzter Datenpunkt: vor {days} Tagen. Fuehre einen Flex-Pull aus.',
+      staleData: 'Die Daten laufen nicht weiter: letzter Datenpunkt {date} ({days} Geschaeftstage). Pulls koennen trotzdem erfolgreich sein; pruefe den Zeitraum der Activity-Query im Client Portal.',
+      stalePull: 'Seit {hours} h kein erfolgreicher Flex-Pull. Token oder Scheduler pruefen.',
+      pageErrorTitle: 'Diese Seite konnte nicht angezeigt werden',
+      pageErrorBody: 'Ein unerwarteter Wert hat das Rendern abgebrochen. Der Rest des Dashboards funktioniert weiter.',
+      retry: 'Erneut versuchen',
       footerAdvice: 'Die angezeigten Daten sind historisch und keine Finanzberatung.',
       footerTwr: 'TWR = Time-Weighted Return, misst die Portfolio-Performance bereinigt um Ein- und Auszahlungen.',
       asOf: 'Stand {date}',
@@ -564,12 +690,12 @@ const messages = {
       steps: {
         token: 'IBKR Client Portal -> Performance & Reports -> Flex Queries -> Flex Web Service -> Generate Token.',
         env: 'Kopiere .env.example nach .env und setze IB_FLEX_TOKEN, IB_FLEX_TOKEN_EXPIRY und IB_FLEX_QUERY_ID.',
-        activity: 'Activity Flex Query: Name dashboard_full_daily, XML-Format, Zeitraum Year to Date und alle erforderlichen Sektionen/Spalten.',
+        activity: 'Activity Flex Query: Name dashboard_full_daily, XML-Format, Zeitraum Last 30 Calendar Days und alle erforderlichen Sektionen/Spalten.',
         tc: 'Trade Confirmation Flex Query: Name dashboard_tc_daily, XML-Format und alle Felder in Trade Confirms. Setze IB_FLEX_QUERY_ID_TC, wenn du sie nutzt.',
         start: 'Starte Docker Compose und fuehre danach einmal Bootstrap aus, um die Historie zu laden.',
       },
       requiredSections: 'Wichtige Activity-Flex-Sektionen',
-      sections: 'Account Information, NAV in Base, Change in NAV, Cash Report, Open Positions, Trades, Cash Transactions, Dividend Accruals, Interest Accruals, Conversion Rates, FIFO/MTM Performance, Transaction Taxes, Corporate Actions, Transfers.',
+      sections: 'Account Information, NAV in Base, Change in NAV, MTD/YTD Performance Summary, Cash Report, Open Positions, Trades, Cash Transactions, Dividend Accruals, Interest Accruals, Conversion Rates, Securities Info, FIFO/MTM Performance, Transaction Taxes, Corporate Actions, Option Exercises, Assignments, Expirations, Transfers.',
       healthTitle: 'Schnellchecks',
       setupStatusTitle: 'Echter Setup-Status',
       setupStatusDescription: 'Nicht geheime Backend-Sicht auf Flex, TC und lokale Datenbank.',
@@ -592,19 +718,59 @@ const messages = {
         api: 'API: http://localhost:8001/health',
         swagger: 'Swagger: http://localhost:8001/docs',
       },
+      notifications: {
+        title: 'Telegram-Benachrichtigungen',
+        description: 'Wähle, welche Nachrichten der Bot sendet, Inhalt und Häufigkeit. Sofort wirksam.',
+        loading: 'Konfiguration wird geladen…',
+        telegramOn: 'Telegram verbunden',
+        telegramOff: 'Telegram nicht konfiguriert',
+        telegramHint: 'Setze TELEGRAM_BOT_TOKEN und TELEGRAM_CHAT_ID in .env, damit Nachrichten gesendet werden.',
+        on: 'An',
+        off: 'Aus',
+        frequency: 'Häufigkeit',
+        weekday: 'Tag',
+        dayOfMonth: 'Tag des Monats',
+        time: 'Uhrzeit',
+        sections: 'Inhalt',
+        alertBands: 'Auch bei Überschreiten von Risikoschwellen warnen',
+        interval: 'Intervall',
+        requiresOverlayOff: 'Deaktiviert: benötigt das Live-Overlay (ENABLE_LIVE_OVERLAY=false)',
+        weekdaysShort: 'Mo,Di,Mi,Do,Fr,Sa,So',
+        save: 'Speichern',
+        saving: 'Speichern…',
+        saved: 'Gespeichert',
+        saveError: 'Speichern fehlgeschlagen',
+        sendTest: 'Test senden',
+        testing: 'Senden…',
+        testSent: 'Test gesendet',
+        testFailed: 'Senden fehlgeschlagen',
+        freq: { off: 'Aus', daily: 'Täglich', weekly: 'Wöchentlich', biweekly: 'Zweiwöchentlich', monthly: 'Monatlich' },
+        section: { dividends: 'Dividenden', operations: 'Transaktionen', commissions: 'Gebühren' },
+        msg: {
+          daily_digest: { name: 'Tägliche Übersicht', help: 'Dividenden, Transaktionen und Gebühren nach jedem Pull.' },
+          performance_pulse: { name: 'Portfolio-Puls', help: 'MTD/YTD-Rendite vs. S&P 500 und Margin-APR.' },
+          token_expiry: { name: 'Flex-Token-Ablauf', help: 'Warnung, wenn der Flex-Token bald abläuft.' },
+          margin_eod: { name: 'Margin-Warnung (EOD)', help: 'Reg-T-Schätzung aus Flex zum Handelsschluss; warnt bei Schwellenübertritt.' },
+          margin_usage: { name: 'Margin-Auslastung', help: 'Wie viel Margin du nutzt, wie nah am empfohlenen Limit und wie viel % des NLV Cash ist.' },
+          staleness: { name: 'Pipeline veraltet', help: 'Warnt, wenn der letzte Pull zu alt ist.' },
+          price_alerts: { name: 'Kursalarme', help: 'Schwellenübertritte je Regel (benötigt TWS/Live).' },
+          margin_live: { name: 'Margin in Echtzeit', help: 'Live-Margin-Risiko von IBKR (benötigt TWS/Live).' },
+          margin_fx: { name: 'Margin-Kosten je Währung', help: 'Prüfung der günstigsten Währung für die Margin-Schuld.' },
+        },
+      },
     },
     dashboardCards: {
       accountSummary: {
-        title: 'Konto-Uebersicht',
-        description: 'NAV, Cushion, Buying Power und Excess Liquidity.',
+        title: 'Kontouebersicht',
+        description: 'NAV, Zeitraum-TWR, Rendite seit Start und Nettoertrag 12 M.',
+      },
+      riskStrip: {
+        title: 'Risikoleiste',
+        description: 'Cushion, Excess Liquidity und Leverage (Reg-T-Schaetzung) plus Liquiditaet (Cash / NLV) mit Link zu Margin.',
       },
       tradingQuality: {
-        title: 'Trading Quality',
-        description: 'Profit Factor, Win Rate, Expectancy, Payoff, Drawdown und Sharpe auf realisiertem P&L.',
-      },
-      pnlAttribution: {
-        title: 'P&L-Attribution',
-        description: 'Aufschluesselung von realized, MTM, Dividenden, Zinsen, Gebuehren, Steuern und FX.',
+        title: 'Trading-Qualitaet',
+        description: 'Profit Factor, Trefferquote, Erwartungswert, Payoff, Sharpe und Drawdown auf NAV. Standardmaessig eingeklappt.',
       },
       tradeCalendar: {
         title: 'Kalender',
@@ -614,13 +780,9 @@ const messages = {
         title: 'Monatsaktivitaet',
         description: 'Gehandelte Ticker, offener Credit und monatlicher Profit Factor.',
       },
-      coreKpis: {
-        title: 'Kontext-KPIs',
-        description: 'TWR, Dividenden, PADI, Yield, unrealisierter P&L und Positionen.',
-      },
       allTimeReturn: {
-        title: 'Total Return',
-        description: 'NAV minus kumulierte Nettoeinzahlungen seit Start.',
+        title: 'Rendite seit Start',
+        description: 'NAV abzueglich Nettoeinzahlungen seit Start. Standardmaessig eingeklappt.',
       },
       realizedMonthly: {
         title: 'Monatliche Realized-Matrix',
@@ -649,9 +811,25 @@ function isLanguage(value: string | null | undefined): value is Language {
   return value === 'es' || value === 'en' || value === 'de';
 }
 
+function readStorage(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeStorage(key: string, value: string): void {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    // Private mode or blocked storage: the setting just does not persist.
+  }
+}
+
 function browserLanguage(): Language {
   if (typeof window === 'undefined') return 'es';
-  const stored = window.localStorage.getItem(STORAGE_KEY);
+  const stored = readStorage(STORAGE_KEY);
   if (isLanguage(stored)) return stored;
 
   const preferred = window.navigator.languages?.[0] ?? window.navigator.language;
@@ -662,7 +840,7 @@ function browserLanguage(): Language {
 
 function browserPrivacyMode(): boolean {
   if (typeof window === 'undefined') return false;
-  return window.localStorage.getItem(PRIVACY_MODE_STORAGE_KEY) === 'true';
+  return readStorage(PRIVACY_MODE_STORAGE_KEY) === 'true';
 }
 
 function lookup(catalog: unknown, key: string): string {
@@ -694,15 +872,18 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   };
 
   useEffect(() => {
-    window.localStorage.setItem(STORAGE_KEY, language);
+    writeStorage(STORAGE_KEY, language);
     document.documentElement.lang = language;
   }, [language]);
 
   useEffect(() => {
-    window.localStorage.setItem(PRIVACY_MODE_STORAGE_KEY, privacyMode ? 'true' : 'false');
+    writeStorage(PRIVACY_MODE_STORAGE_KEY, privacyMode ? 'true' : 'false');
   }, [privacyMode]);
 
   const value = useMemo<I18nValue>(() => {
+    // Sync the formatter flag before children render with the new value.
+    setPrivacyModeFlag(privacyMode);
+    setFormatLocale(LOCALES[language]);
     const catalog = messages[language];
     return {
       language,

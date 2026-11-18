@@ -4,6 +4,8 @@
    ============================================================ */
 
 :root {
+  color-scheme: dark;
+
   /* ---------- Surfaces ---------- */
   --bg-page:        #13111c;   /* main page bg, deep violet-black */
   --bg-sidebar:     #0d0b15;   /* sidebar bg, even darker */
@@ -24,7 +26,7 @@
   --fg-strong:      #fafafa;
   --fg-default:     #e0e0ea;
   --fg-muted:       #8b88a6;
-  --fg-subtle:      #5d5b73;
+  --fg-subtle:      #7d7a96;   /* ≥4.5:1 on surface-2 (was #5d5b73, 2.45:1) */
   --fg-on-color:    #ffffff;
 
   /* ---------- Brand / Primary (violet) ---------- */
@@ -73,6 +75,21 @@
   --shadow-lift:   0 8px 24px rgba(0, 0, 0, 0.35);
   --shadow-purple: 0 8px 32px rgba(168, 85, 247, 0.20);
 
+  /* ---------- Charts ---------- */
+  --chart-grid:   rgba(255, 255, 255, 0.05);
+  --chart-axis:   #8b88a6;
+  --chart-cursor: rgba(168, 85, 247, 0.06);
+
+  /* ---------- Motion (mirrored in src/lib/motion.ts) ---------- */
+  --dur-fast:   120ms;   /* hover, tooltip fade, tint changes */
+  --dur-base:   240ms;   /* drawers, month slides, toggles */
+  --dur-enter:  280ms;   /* card / panel entrance */
+  --dur-slow:   450ms;   /* bar growth */
+  --ease-out:      cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --stagger-step: 40ms;
+
   /* ---------- Type ---------- */
   --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI",
                Roboto, Helvetica, Arial, sans-serif;
@@ -98,4 +115,4 @@
 .neg  { color: var(--color-negative); }
 .warn { color: var(--color-warning); }
 .muted { color: var(--fg-muted); }
-.tabular-nums { font-variant-numeric: tabular-nums; }
+.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }

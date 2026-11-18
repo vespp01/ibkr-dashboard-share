@@ -4,7 +4,7 @@ The uq_dividend_accrual constraint spans (account_id, conid, ex_date,
 pay_date, gross_amount), but conid/ex_date/pay_date/gross_amount are nullable
 and SQL NULLs never compare equal — `ON CONFLICT DO NOTHING` silently
 re-inserts any accrual with a NULL key column on every load. The loader must
-dedupe those rows itself with a NULL-aware existence check (finding #06).
+dedupe those rows itself with a NULL-aware existence check.
 """
 
 from __future__ import annotations

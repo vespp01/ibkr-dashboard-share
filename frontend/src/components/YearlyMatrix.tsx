@@ -1,19 +1,13 @@
-import { useMemo } from 'react';
+import { useMemo, type CSSProperties } from 'react';
 import type { RealizedTimeseriesRow } from '../lib/api';
+import { formatCurrency, formatSignedCompactCurrency } from '../lib/format';
 import { useI18n } from '../lib/i18n';
+import { heatCap } from './calendarHeat';
+import '../styles/calendar.css';
 
 interface Props {
   data: RealizedTimeseriesRow[];
   currency: string;
-}
-
-function formatCompact(value: number, currency: string, locale: string): string {
-  if (value === 0) return `${currency} 0`;
-  const abs = Math.abs(value);
-  const sign = value > 0 ? '+' : '-';
-  if (abs >= 1_000_000) return `${sign}${currency} ${(abs / 1_000_000).toLocaleString(locale, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}M`;
-  if (abs >= 1000) return `${sign}${currency} ${(abs / 1000).toLocaleString(locale, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}k`;
-  return `${sign}${currency} ${abs.toLocaleString(locale, { maximumFractionDigits: 0 })}`;
 }
 
 export function YearlyMatrix({ data, currency }: Props) {
@@ -24,10 +18,9 @@ export function YearlyMatrix({ data, currency }: Props) {
       .replace('.', ''))
   ), [locale]);
 
-  const { years, byYearMonth, maxAbs } = useMemo(() => {
+  const { years, byYearMonth, cap } = useMemo(() => {
     const yearsSet = new Set<number>();
     const map = new Map<string, number>();
-    let maxAbs = 0;
     data.forEach((row) => {
       if (row.bucket.length === 7) {
         const [yStr, mStr] = row.bucket.split('-');
@@ -35,14 +28,12 @@ export function YearlyMatrix({ data, currency }: Props) {
         const m = parseInt(mStr, 10);
         yearsSet.add(y);
         map.set(`${y}-${m}`, row.realized);
-        const abs = Math.abs(row.realized);
-        if (abs > maxAbs) maxAbs = abs;
       }
     });
     return {
       years: Array.from(yearsSet).sort((a, b) => a - b),
       byYearMonth: map,
-      maxAbs,
+      cap: heatCap(Array.from(map.values())),
     };
   }, [data]);
 
@@ -60,9 +51,10 @@ export function YearlyMatrix({ data, currency }: Props) {
     return total;
   };
 
+  // sqrt like the calendar, so small months stay visible next to outliers.
   const intensity = (value: number | undefined): number => {
-    if (value === undefined || maxAbs === 0) return 0;
-    return Math.min(1, Math.abs(value) / maxAbs);
+    if (value === undefined || value === 0 || cap === 0) return 0;
+    return Math.sqrt(Math.min(1, Math.abs(value) / cap));
   };
 
   return (
@@ -76,27 +68,27 @@ export function YearlyMatrix({ data, currency }: Props) {
       </div>
       {years.map((y) => {
         const yearTotal = getYearTotal(y);
+        const totalTone = yearTotal > 0 ? 'positive-strong' : yearTotal < 0 ? 'negative-strong' : 'neutral-strong';
         return (
           <div key={y} className="yearly-matrix-row">
             <div className="yearly-matrix-cell yearly-matrix-label">{y}</div>
             {monthsShort.map((_, idx) => {
               const value = getCell(y, idx + 1);
-              const alpha = intensity(value);
               const positive = value !== undefined && value > 0;
               const negative = value !== undefined && value < 0;
               return (
                 <div
                   key={idx}
                   className={`yearly-matrix-cell ${positive ? 'positive' : negative ? 'negative' : 'empty'}`}
-                  style={{ '--cell-alpha': alpha } as React.CSSProperties}
-                  title={value !== undefined ? `${y}-${String(idx + 1).padStart(2, '0')} · ${value.toFixed(2)} ${currency}` : ''}
+                  style={{ '--cell-alpha': intensity(value) } as CSSProperties}
+                  title={value !== undefined ? `${y}-${String(idx + 1).padStart(2, '0')} · ${formatCurrency(value, currency, locale)}` : undefined}
                 >
-                  {value !== undefined && value !== 0 ? formatCompact(value, '', locale) : ''}
+                  {value !== undefined && value !== 0 ? formatSignedCompactCurrency(value, '', locale) : ''}
                 </div>
               );
             })}
-            <div className={`yearly-matrix-cell yearly-matrix-total ${yearTotal >= 0 ? 'positive-strong' : 'negative-strong'}`}>
-              {formatCompact(yearTotal, currency, locale)}
+            <div className={`yearly-matrix-cell yearly-matrix-total ${totalTone}`}>
+              {formatSignedCompactCurrency(yearTotal, currency, locale)}
             </div>
           </div>
         );

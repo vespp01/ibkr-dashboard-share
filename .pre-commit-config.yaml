@@ -6,6 +6,11 @@
 # shareable history. The baseline contains reviewed placeholder-only matches.
 # To re-baseline:
 #   detect-secrets scan --baseline .secrets.baseline
+#
+# docs-api-inventory runs tests/test_docs_api_inventory.py when README.md, the
+# setup guide or the API routes change: CI skips doc-only pushes (paths-ignore),
+# so a broken endpoint-count phrase would otherwise turn the next code push red.
+# Needs the host venv (.venv, see README.md).
 
 repos:
   - repo: https://github.com/Yelp/detect-secrets
@@ -18,7 +23,16 @@ repos:
             \.venv/.*|
             node_modules/.*|
             frontend/node_modules/.*|
-            legacy/.*|
             Extractos/.*|
             \.secrets\.baseline
           )$
+
+  - repo: local
+    hooks:
+      - id: docs-api-inventory
+        name: docs API inventory matches OpenAPI
+        # Worktrees have no .venv of their own: fall back to the primary checkout's.
+        entry: bash -c 'p=.venv/bin/pytest; [ -x "$p" ] || p="$(git rev-parse --path-format=absolute --git-common-dir)/../.venv/bin/pytest"; exec "$p" -q tests/test_docs_api_inventory.py'
+        language: system
+        pass_filenames: false
+        files: ^(README\.md|docs/puesta-en-marcha\.html|ibkr_backend/api/.*)$

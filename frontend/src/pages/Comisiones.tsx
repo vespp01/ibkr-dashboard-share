@@ -33,7 +33,7 @@ const COPY = {
     assetClass: 'Asset Class',
     commission: 'Comisión',
     trades: 'Trades',
-    perTrade: '€/trade',
+    perTrade: 'por trade',
   },
   en: {
     unavailableTitle: 'Fees unavailable',

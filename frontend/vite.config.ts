@@ -3,7 +3,8 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, '.', 'VITE_');
-  const apiTarget = env.VITE_API_TARGET ?? 'http://127.0.0.1:8000';
+  // :8001 is the compose backend's host port; :8000 is often another container.
+  const apiTarget = env.VITE_API_TARGET ?? 'http://127.0.0.1:8001';
 
   return {
     plugins: [react()],

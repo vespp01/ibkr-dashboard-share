@@ -32,6 +32,18 @@ async function get<T>(
   return (await res.json()) as T;
 }
 
+async function post<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body ?? {}),
+  });
+  if (!res.ok) {
+    throw new ApiError(`POST ${path} -> ${res.status}`, res.status);
+  }
+  return (await res.json()) as T;
+}
+
 // ---- Endpoint signatures (subset) - extend as the dashboard grows. ----
 
 export interface HealthResponse {
@@ -41,11 +53,7 @@ export interface HealthResponse {
 export interface PortfolioOverview {
   as_of?: string;
   nav_base?: number;
-  nav_date?: string;
   base_currency?: string;
-  realized_pnl_base?: number;
-  deposits_withdrawals_base?: number;
-  total_pnl_base?: number;
   freshness?: {
     positions_as_of?: string;
     positions_days_stale?: number;
@@ -57,13 +65,11 @@ export interface PortfolioOverview {
     days_stale?: number;
     unrealized_pnl_base?: number;
     market_value_base?: number;
-    cost_base?: number;
     unrealized_pct?: number;
     positions?: number;
   };
-  dividends?: { gross_base?: number; withholding_base?: number; net_base?: number };
-  commissions?: { total_base?: number; trade_count?: number };
-  interest?: { net_base?: number };
+  dividends?: DividendsSummary;
+  commissions?: CommissionsSummary;
   positions_consistency?: {
     market_value_base?: number;
     nav_positions_base?: number;
@@ -79,7 +85,6 @@ export interface PortfolioOverview {
     positions_total?: number;
     positions_covered?: number;
     coverage_ratio?: number;
-    equity_market_value_base?: number;
     nav_base?: number;
     by_symbol?: Array<{
       symbol: string;
@@ -116,7 +121,10 @@ export interface PositionRow {
   position_value_base?: number;
   cost_basis_money_base?: number;
   fifo_pnl_unrealized_base?: number;
-  pct_of_nav?: number;
+  /** position_value_base / NAV x 100 */
+  weight?: number | null;
+  /** Flex percentOfNAV (share within the asset class) */
+  pct_of_asset_class?: number | null;
 }
 
 export interface WithholdingCountryRow {
@@ -132,6 +140,30 @@ export interface DividendsCountryRow {
   net?: number;
 }
 
+export interface UpcomingDividendEvent {
+  symbol: string | null;
+  conid: number;
+  ex_date: string | null;
+  pay_date: string;
+  quantity: number | null;
+  gross_rate: number | null;
+  currency: string;
+  gross_amount: number | null;
+  tax: number | null;
+  net_amount: number | null;
+  fx_rate_to_base: number | null;
+  gross_base: number | null;
+  net_base: number | null;
+}
+
+export interface UpcomingDividends {
+  as_of: string | null;
+  base_currency: string;
+  events: UpcomingDividendEvent[];
+  totals: { count: number; gross_base: number; net_base: number };
+  stale_open_events: number;
+}
+
 export interface CommissionsSummary {
   total_base?: number;
   trade_count?: number;
@@ -140,12 +172,25 @@ export interface CommissionsSummary {
 }
 
 export interface PerformanceTwr {
-  twr_pct?: number;
-  annualised_pct?: number;
-  raw_twr_pct?: number;
-  raw_annualised_pct?: number;
+  /** Chained IBKR ChangeInNAV daily TWR (null when unreliable or no FX rate). */
+  twr_pct?: number | null;
+  /** Null for windows under 365 days (GIPS). */
+  annualised_pct?: number | null;
+  annualised_note?: string;
+  raw_twr_pct?: number | null;
   n_days?: number;
-  series?: Array<{ date: string; nav: number; cashflow: number; cumulative_pct: number }>;
+  from_date?: string;
+  to_date?: string;
+  /** Last NAV day before the window (the base the first return is measured from). */
+  base_date?: string | null;
+  display_currency?: string;
+  fx_source?: 'identity' | 'ibkr_fx_rates' | 'frankfurter';
+  fx_degraded?: boolean;
+  note?: string;
+  /** Modified Dietz on the same rows, shown only as a reconciliation. */
+  reconciliation?: { dietz_twr_pct: number; canonical_base_twr_pct: number; diff_pp: number };
+  /** Absent with `?summary=1`. */
+  series?: Array<{ date: string; nav: number; cashflow: number; daily_return_pct: number; cumulative_pct: number }>;
   quality?: {
     is_reliable?: boolean;
     reason?: string;
@@ -158,7 +203,10 @@ export interface PerformanceTwr {
 }
 
 export interface XirrResponse {
+  /** Null for windows under 365 days (not annualised). */
   xirr_pct?: number | null;
+  annualised?: boolean;
+  window_days?: number;
   terminal_nav_base?: number;
   terminal_date?: string;
   flow_count?: number;
@@ -196,10 +244,24 @@ export interface PipelineStatus {
   token_expiry?: string | null;
   live_overlay_enabled?: boolean;
   staleness?: {
-    latest_success_at?: string | null;
+    last_success_at?: string | null;
     age_hours?: number | null;
     is_stale?: boolean;
     threshold_hours?: number;
+    reason?: string | null;
+  };
+  data_freshness?: {
+    last_data_date?: string | null;
+    age_business_days?: number | null;
+    data_is_stale?: boolean;
+    threshold_business_days?: number;
+    reason?: string | null;
+  };
+  scheduler?: {
+    heartbeat_at?: string | null;
+    heartbeat_age_seconds?: number | null;
+    last_pull_attempt_at?: string | null;
+    last_pull_attempt_age_seconds?: number | null;
   };
   latest_run?: {
     fetched_at?: string;
@@ -212,10 +274,184 @@ export interface PipelineStatus {
   } | null;
 }
 
+export type TaxScenarioStatus = 'draft' | 'reviewed' | 'approved' | 'blocked';
+export type TaxSaleCandidateSource = 'manual' | 'metodo_tendencia_exit';
+export type TaxSaleSignalKind = 'exit_mp' | 'exit_lp' | null;
+
+export interface TaxSaleCandidate {
+  candidate_id: string;
+  instrument_id: string;
+  selection_source: TaxSaleCandidateSource;
+  source_ref: string;
+  selected_at: string;
+  signal_kind: TaxSaleSignalKind;
+}
+
+export interface TaxSaleScenario {
+  scenario_id: string;
+  status: TaxScenarioStatus;
+  objective: string;
+  sales: Array<{
+    candidate_id: string;
+    instrument_id: string;
+    quantity: string;
+    assumed_sale_date: string;
+    assumed_price: string;
+    currency: string;
+    fifo_allocations: Array<{ acquisition_event_id: string; quantity: string }>;
+    estimated_gain_loss_eur: string;
+    deferred_loss_eur: string;
+  }>;
+  summary: {
+    estimated_proceeds_eur: string;
+    estimated_gain_loss_eur: string;
+    estimated_tax_delta_eur: string;
+    estimated_transaction_cost_eur: string;
+    portfolio_deviation_score: string;
+  };
+  warnings: string[];
+  blockers: string[];
+}
+
+export interface TaxScenarioSet {
+  schema_version: 'tax_sale_scenarios.v1';
+  scenario_set_id: string;
+  generated_at: string;
+  snapshot_id: string;
+  snapshot_hash: string;
+  tax_profile: {
+    jurisdiction: 'ES';
+    tax_year: number;
+    residency_status: 'confirmed' | 'unconfirmed';
+    regime: string;
+    region: string;
+  };
+  rule_pack: {
+    id: string;
+    version: string;
+    review_status: TaxScenarioStatus | 'expired';
+    content_hash: string;
+  };
+  candidate_set: {
+    candidate_set_id: string;
+    generated_at: string;
+    candidates: TaxSaleCandidate[];
+  };
+  status: TaxScenarioStatus;
+  scenarios: TaxSaleScenario[];
+  warnings: string[];
+  blockers: string[];
+}
+
+export interface TaxIntegrationResponse {
+  integration_status: 'not_configured' | 'missing' | 'invalid' | 'ready';
+  reason_code?: string | null;
+  expected_schema_version: 'tax_sale_scenarios.v1';
+  document_hash?: string | null;
+  scenario_set?: TaxScenarioSet | null;
+}
+
+export type IntegrationCategory = 'project' | 'broker' | 'service';
+export type IntegrationDirection = 'outbound' | 'inbound' | 'bidirectional';
+export type IntegrationLevel = 'ok' | 'warn' | 'error' | 'off' | 'info';
+export type IntegrationControlKind = 'env' | 'route' | 'none';
+
+export interface IntegrationStatus {
+  id: string;
+  category: IntegrationCategory;
+  name: string;
+  contract: string | null;
+  direction: IntegrationDirection;
+  mechanism: string;
+  enabled: boolean;
+  implemented: boolean;
+  removable: boolean;
+  status: string;
+  level: IntegrationLevel;
+  control: string | null;
+  control_kind: IntegrationControlKind;
+  reason_code?: string | null;
+  as_of?: string | null;
+  days_stale?: number | null;
+  days_to_expiry?: number | null;
+}
+
+export interface IntegrationsStatusResponse {
+  generated_at: string;
+  integrations: IntegrationStatus[];
+}
+
+export type NotificationFreq = 'off' | 'daily' | 'weekly' | 'biweekly' | 'monthly';
+export type NotificationScheduleKind = 'chained' | 'interval' | 'cron';
+
+export interface NotificationCadence {
+  freq: NotificationFreq;
+  weekday: number | null;
+  day_of_month: number | null;
+  time: string | null;
+}
+
+export interface NotificationMessageConfig {
+  enabled: boolean;
+  sections?: string[];
+  cadence: NotificationCadence;
+  alert_bands?: boolean;
+}
+
+export interface NotificationConfig {
+  version: number;
+  messages: Record<string, NotificationMessageConfig>;
+}
+
+export interface NotificationMessageSchema {
+  id: string;
+  schedule_kind: NotificationScheduleKind;
+  requires_live_overlay: boolean;
+  supports_sections: boolean;
+  sections: string[];
+  supports_alert_bands: boolean;
+  editable: string[];
+  cadence_fields: string[];
+  interval_cron?: string;
+}
+
+export interface NotificationSchema {
+  version: number;
+  frequencies: NotificationFreq[];
+  messages: NotificationMessageSchema[];
+}
+
+export interface NotificationCapabilities {
+  telegram_configured: boolean;
+  live_overlay_enabled: boolean;
+  scheduler_running: boolean;
+}
+
+export interface NotificationConfigResponse {
+  config: NotificationConfig;
+  schema: NotificationSchema;
+  capabilities: NotificationCapabilities;
+}
+
+export interface NotificationSaveResponse {
+  config: NotificationConfig;
+  applied: { applied: boolean; reason?: string; jobs?: Record<string, string> };
+}
+
+export interface NotificationConfigPatch {
+  messages: Record<string, NotificationMessageConfig>;
+}
+
 export const api = {
   health: () => get<HealthResponse>('/health'),
   dataCoverage: () => get<DataCoverage>('/data/coverage'),
   pipelineStatus: () => get<PipelineStatus>('/pipeline/status'),
+  taxScenarios: () => get<TaxIntegrationResponse>('/tax/scenarios'),
+  integrationsStatus: () => get<IntegrationsStatusResponse>('/integrations/status'),
+  notificationConfig: () => get<NotificationConfigResponse>('/config/notifications'),
+  saveNotificationConfig: (body: NotificationConfigPatch) =>
+    post<NotificationSaveResponse>('/config/notifications', body),
+  testNotification: () => post<{ sent: boolean; error?: string }>('/config/notifications/test', {}),
   portfolioOverview: (filters: PeriodFilters = {}) =>
     get<PortfolioOverview>('/portfolio/overview', filters as Record<string, string | number | undefined>),
   portfolioPositions: (filters: Pick<PeriodFilters, 'account_id'> = {}) =>
@@ -231,12 +467,16 @@ export const api = {
     get<WithholdingCountryRow[]>('/dividends/withholding-by-country', filters as Record<string, string | number | undefined>),
   dividendsByCountry: (filters: PeriodFilters = {}) =>
     get<DividendsCountryRow[]>('/dividends/by-country', filters as Record<string, string | number | undefined>),
+  dividendsUpcoming: (filters: Pick<PeriodFilters, 'account_id'> = {}) =>
+    get<UpcomingDividends>('/dividends/upcoming', filters as Record<string, string | number | undefined>),
   commissionsSummary: (filters: PeriodFilters = {}) =>
     get<CommissionsSummary>('/commissions/summary', filters as Record<string, string | number | undefined>),
-  performanceTwr: (filters: PeriodFilters = {}, currency?: string) =>
+  /** `summary` omits the daily series (< 2 KB instead of ~100 KB). */
+  performanceTwr: (filters: PeriodFilters = {}, currency?: string, summary = false) =>
     get<PerformanceTwr>('/performance/twr', {
       ...(filters as Record<string, string | number | undefined>),
       ...(currency ? { currency } : {}),
+      ...(summary ? { summary: 1 } : {}),
     }),
   performanceXirr: (filters: PeriodFilters = {}) =>
     get<XirrResponse>('/performance/xirr', filters as Record<string, string | number | undefined>),
@@ -245,7 +485,7 @@ export const api = {
       ...(filters as Record<string, string | number | undefined>),
       bucket,
     }),
-  trades: (filters: PeriodFilters & { symbol?: string; asset_class?: string; status?: 'all' | 'open' | 'closed'; limit?: number; offset?: number } = {}) =>
+  trades: (filters: PeriodFilters & { symbol?: string; asset_class?: string; strategy?: string; status?: 'all' | 'open' | 'closed'; limit?: number; offset?: number } = {}) =>
     get<TradesResponse>('/trades', filters as Record<string, string | number | undefined>),
   openShorts: (filters: { account_id?: string } = {}) =>
     get<OpenShortRow[]>('/portfolio/open-shorts', filters as Record<string, string | number | undefined>),
@@ -256,10 +496,11 @@ export const api = {
       ...(filters as Record<string, string | number | undefined>),
       bucket,
     }),
-  performanceRisk: (filters: PeriodFilters = {}, riskFreeRatePct = 0) =>
+  /** Omit `riskFreeRatePct` to use the backend's per-year CHF table (default 0 %). */
+  performanceRisk: (filters: PeriodFilters = {}, riskFreeRatePct?: number) =>
     get<RiskMetrics>('/performance/risk', {
       ...(filters as Record<string, string | number | undefined>),
-      risk_free_rate_pct: riskFreeRatePct,
+      ...(riskFreeRatePct !== undefined ? { risk_free_rate_pct: riskFreeRatePct } : {}),
     }),
   performanceAlpha: (filters: PeriodFilters = {}, currency = 'CHF') =>
     get<AlphaBetaResponse>('/performance/alpha', {
@@ -302,34 +543,14 @@ export const api = {
     get<ExecutionsResponse>('/trades/executions', filters as Record<string, string | number | boolean | undefined>),
   optionsSummary: (filters: PeriodFilters = {}) =>
     get<OptionsSummaryResponse>('/options/summary', filters as Record<string, string | number | undefined>),
-  optionsTrades: (
-    filters: PeriodFilters & {
-      underlying?: string;
-      right?: 'C' | 'P';
-      status?: 'all' | 'open' | 'closed';
-      limit?: number;
-      offset?: number;
-    } = {},
-  ) =>
-    get<OptionsTradesResponse>('/options/trades', filters as Record<string, string | number | undefined>),
   optionsEae: (filters: PeriodFilters & { underlying?: string } = {}) =>
     get<OptionsEaeResponse>('/options/eae', filters as Record<string, string | number | undefined>),
-  optionsPremiumSeries: (filters: PeriodFilters & { bucket?: 'month' | 'year' } = {}) =>
-    get<OptionsPremiumSeriesResponse>('/options/premium-timeseries', filters as Record<string, string | number | undefined>),
   optionsByUnderlying: (filters: PeriodFilters = {}) =>
     get<OptionsByUnderlyingResponse>('/options/by-underlying', filters as Record<string, string | number | undefined>),
   optionsOpenPositions: (filters: Pick<PeriodFilters, 'account_id'> = {}) =>
     get<OptionsOpenPositionsResponse>('/options/open-positions', filters as Record<string, string | number | undefined>),
-  optionsAssignmentRisk: () =>
-    get<OptionsAssignmentRiskResponse>('/options/assignment-risk'),
-  optionsConcentration: (filters: Pick<PeriodFilters, 'account_id'> = {}) =>
-    get<OptionsConcentrationResponse>('/options/concentration', filters as Record<string, string | number | undefined>),
-  optionsDteBuckets: () =>
-    get<OptionsDteBucketsResponse>('/options/dte-buckets'),
   optionsPnlAttribution: (filters: PeriodFilters = {}) =>
     get<OptionsPnlAttributionResponse>('/options/pnl-attribution', filters as Record<string, string | number | undefined>),
-  optionsAssignmentRate: (filters: PeriodFilters = {}) =>
-    get<OptionsAssignmentRateResponse>('/options/assignment-rate', filters as Record<string, string | number | undefined>),
 };
 
 // ---- Options ----
@@ -425,6 +646,7 @@ export interface OptionsPnlAttributionByUnderlying {
 
 export interface OptionsPnlAttributionTotals {
   short_premium_base: number;
+  long_premium_base?: number;
   wheel_stock_base: number;
   wheel_dividends_base: number;
   wheel_withholding_base: number;
@@ -603,6 +825,21 @@ export interface OptionsOpenPositionRow {
   last_underlying_close?: number | null;
   moneyness_pct?: number | null;
   currency?: string | null;
+  // OptionsLab management signal joined by underlying/right/expiry/strike; null when none applies.
+  optionslab?: OptionsLabSignal | null;
+}
+
+export type OptionsLabAction = 'hold' | 'take_profit' | 'stop' | 'warning' | 'review' | 'unknown';
+
+export interface OptionsLabSignal {
+  action: OptionsLabAction;
+  status_text: string | null;
+  capture_pct: number | null; // percent units (45.2 = 45.2 %)
+  short_delta: number | null;
+  dte: number | null;
+  leg: 'short' | 'long';
+  generated_at: string; // UTC ISO 8601, Z suffix
+  stale: boolean; // generated_at older than 24 h
 }
 
 export interface OptionsOpenPositionsResponse {
@@ -655,7 +892,6 @@ export interface RealizedTimeseriesRow {
 export interface TradeRow {
   trade_id: string;
   ib_order_id?: string;
-  account_id: string;
   symbol: string;
   description?: string;
   asset_class?: string;
@@ -691,8 +927,14 @@ export interface TradesResponse {
   rows: TradeRow[];
   limit: number;
   offset: number;
+  /** strategy labels present under the current filters (before the strategy filter) */
+  strategies?: string[];
   summary: {
     total: number;
+    /** opening fills under the current filters */
+    open_count: number;
+    /** closed orders (fills of one order summed); win + loss + be */
+    closed_count: number;
     win: number;
     loss: number;
     be: number;
@@ -709,15 +951,25 @@ export interface TradesResponse {
 export interface AttributionTimeseriesRow {
   bucket: string;
   mtm?: number;
-  realized?: number;
   dividends?: number;
   withholding_tax?: number;
+  change_in_dividend_accruals?: number;
   interest?: number;
+  change_in_interest_accruals?: number;
   commissions?: number;
+  broker_fees?: number;
+  other_fees?: number;
   transaction_tax?: number;
+  sales_tax?: number;
   fx_translation?: number;
+  deposits_withdrawals?: number;
+  asset_transfers?: number;
+  /** Sum of the non-flow components: what the monthly Total Return matrix shows. */
+  total_return_base?: number;
   starting_value?: number;
   ending_value?: number;
+  /** Day bucket only: ending - starting - sum(components), ~0. */
+  residual?: number;
   twr?: number;
 }
 
@@ -732,7 +984,14 @@ export interface RiskMetrics {
   is_truncated?: boolean;
   truncation_reason?: string;
   risk_free_rate_pct: number;
-  annualised_return_pct?: number;
+  risk_free_source?: string;
+  /** Risk metrics are computed on the CHF daily returns. */
+  currency?: string;
+  window_days?: number;
+  /** False under 365 days: annualised return and Calmar are null. */
+  annualised?: boolean;
+  sharpe_method?: 'geometric' | 'arithmetic';
+  annualised_return_pct?: number | null;
   annualised_volatility_pct?: number;
   annualised_downside_volatility_pct?: number;
   sharpe_ratio?: number;
@@ -740,7 +999,7 @@ export interface RiskMetrics {
   max_drawdown_pct?: number;
   max_drawdown_peak_date?: string;
   max_drawdown_trough_date?: string;
-  calmar_ratio?: number;
+  calmar_ratio?: number | null;
   negative_days?: number;
   positive_days?: number;
 }
@@ -749,6 +1008,8 @@ export interface AlphaBetaResponse {
   is_reliable: boolean;
   reason?: string;
   aligned_days?: number;
+  unpaired_days?: number;
+  portfolio_days?: number;
   from_date?: string;
   to_date?: string;
   requested_from?: string;
@@ -756,7 +1017,10 @@ export interface AlphaBetaResponse {
   is_truncated?: boolean;
   truncation_reason?: string;
   benchmark?: string;
+  benchmark_type?: string;
   benchmark_currency?: string;
+  fx_source?: string;
+  benchmark_fx_source?: string | null;
   portfolio_total_return_pct?: number;
   benchmark_total_return_pct?: number;
   simple_alpha_pct?: number;
@@ -771,9 +1035,15 @@ export interface VsBenchmarkResponse {
   // so it must be optional — guard on is_reliable before accessing.
   from?: string;
   to?: string;
+  /** NAV day before the window; both lines are 100 here. */
+  base_date?: string;
   display_currency?: string;
   benchmark?: string;
+  benchmark_type?: string;
   benchmark_currency?: string;
+  fx_source?: string;
+  fx_degraded?: boolean;
+  benchmark_fx_source?: string | null;
   resolution?: {
     points: number;
     max_gap_days: number | null;
@@ -809,18 +1079,24 @@ export interface AttributionResponse {
   ending_value?: number;
   attribution_base: {
     mtm?: number;
-    realized?: number;
-    change_in_unrealized?: number;
     dividends?: number;
     withholding_tax?: number;
+    change_in_dividend_accruals?: number;
     interest?: number;
+    change_in_interest_accruals?: number;
     commissions?: number;
     broker_fees?: number;
     other_fees?: number;
     transaction_tax?: number;
-    deposits_withdrawals?: number;
+    sales_tax?: number;
     fx_translation?: number;
+    deposits_withdrawals?: number;
+    asset_transfers?: number;
   };
+  performance_total_base?: number;
+  /** ending - starting - sum(components): ~0 (residual-free waterfall). */
+  residual_base?: number;
+  residual_pct_of_ending?: number | null;
   twr_compound_pct?: number;
 }
 
@@ -845,6 +1121,9 @@ export interface BenchmarkResponse {
 export interface MarginCashRow {
   currency: string;
   ending_cash: number;
+  /** ending_cash in base at the Flex fx rate; null when the rate is missing */
+  ending_cash_base?: number | null;
+  pct_of_nav?: number | null;
   is_debt: boolean;
 }
 
@@ -856,13 +1135,20 @@ export interface MarginPositionRow {
   pct_of_nav?: number;
 }
 
-export interface MarginSummaryResponse {
+export interface MarginUnavailableResponse {
+  snapshot_date: null;
+  warning: string;
+}
+
+export interface MarginReadyResponse {
   snapshot_date?: string;
   base_currency?: string;
   nav_total?: number;
   nav_breakdown?: { cash?: number; stock?: number; options?: number; bonds?: number };
   cash_by_currency: MarginCashRow[];
   cash_debt_native_sum?: number;
+  /** NAV cash (net of per-currency debt) / NLV, in % */
+  cash_pct_nlv?: number | null;
   exposure: {
     longs_base: number;
     shorts_base: number;
@@ -886,17 +1172,38 @@ export interface MarginSummaryResponse {
   warnings: string[];
 }
 
+export type MarginSummaryResponse = MarginReadyResponse | MarginUnavailableResponse;
+
 export interface MarginInterestResponse {
   period: { from?: string; to?: string };
   paid_total_base: number;
   received_total_base: number;
   net_base: number;
-  paid_by_currency: Array<{ currency: string; amount_native: number; amount_base?: number }>;
-  received_by_currency: Array<{ currency: string; amount_native: number; amount_base?: number }>;
-  avg_debt_native_sum: number;
+  paid_by_currency: Array<{ currency: string; amount_native: number; amount_base?: number; avg_debt_base?: number | null; apr_pct?: number | null }>;
+  /** Every currency that earned interest or held positive cash (idle balances show 0 %). */
+  received_by_currency: Array<{
+    currency: string;
+    amount_native: number;
+    amount_base?: number;
+    cash_interest_native?: number;
+    cash_interest_base?: number;
+    syep_native?: number;
+    syep_base?: number;
+    avg_cash_base?: number;
+    yield_pct?: number | null;
+  }>;
+  /** average debt over the period's snapshot days, all currencies converted to base */
+  avg_debt_base: number;
   days_with_debt: number;
   span_days: number;
-  effective_apr_pct?: number;
+  effective_apr_pct?: number | null;
+  /** credit interest on cash (base), SYEP lending income excluded */
+  cash_interest_base?: number;
+  syep_base?: number;
+  /** average positive cash over the period's snapshot days, in base */
+  avg_cash_base?: number;
+  days_with_cash?: number;
+  effective_cash_yield_pct?: number | null;
 }
 
 export interface LeverageSeriesRow {
@@ -921,7 +1228,8 @@ export interface AllTimeReturnResponse {
   absolute_profit_base?: number;
   absolute_return_pct?: number;
   years_elapsed?: number;
-  cagr_pct?: number;
+  /** All-time money-weighted annual return (replaces the old cagr_pct). */
+  xirr_pct?: number | null;
   note?: string;
 }
 
@@ -932,13 +1240,10 @@ export interface CommissionsBreakdown {
 }
 
 export interface SymbolAttributionRow {
-  account_id?: string;
   conid?: number;
   symbol: string;
   description?: string;
   asset_class?: string;
-  sector?: string | null;
-  industry?: string | null;
   country?: string | null;
   realized_pnl_base?: number;
   realized_st_base?: number;
@@ -967,7 +1272,6 @@ export interface ExecutionRow {
   order_id?: string;
   block_id?: string;
   ext_exec_id?: string;
-  account_id?: string;
   conid?: number;
   symbol?: string;
   description?: string;
@@ -1040,6 +1344,5 @@ export interface OpenShortRow {
   position_value_base?: number;
   cost_basis_money_base?: number;
   fifo_pnl_unrealized_base?: number;
-  open_dt?: string;
   snapshot_date?: string;
 }

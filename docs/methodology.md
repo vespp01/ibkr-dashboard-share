@@ -1,7 +1,7 @@
 # Metodología de cálculo — NAV, TWR, XIRR, benchmark y opciones
 
-> Trazabilidad exigida por `VISION.md` (principio 1: *sin métricas inventadas*;
-> principio 5: *honestidad en comparativas*). Cada cifra documentada aquí
+> Trazabilidad exigida por dos principios del proyecto (*sin métricas inventadas*;
+> *honestidad en comparativas*). Cada cifra documentada aquí
 > traza a un campo Flex de IBKR o a una fórmula transparente. Las referencias
 > apuntan a módulo + función (las líneas exactas cambian; el código es la
 > fuente de verdad si este doc diverge).
@@ -11,14 +11,16 @@
 | Cifra (frontend) | Endpoint | Código | Origen del dato |
 |---|---|---|---|
 | NAV diario | `/portfolio/overview`, serie de `/performance/twr` | `loaders/pipeline.py::_load_nav` | Flex `EquitySummaryByReportDateInBase` (campo `total`) |
-| Aportes/retiradas (external cashflow) | dentro de la serie TWR | `loaders/pipeline.py::_external_cashflows_by_settle_date` | Flex `CashTransaction` tipo `Deposits/Withdrawals` e `Internal Transfers` |
-| TWR acumulado / anualizado | `/performance/twr` | `analytics/twr.py::twr_series` | Modified Dietz diario encadenado sobre `nav_daily` |
-| XIRR (money-weighted) | `/performance/xirr` | `analytics/xirr.py::xirr_summary` | pyxirr sobre cashflows + NAV terminal |
+| Aportes/retiradas (flujo externo) | `/performance/xirr`, `/portfolio/all-time-return`, columna de reconciliación del TWR | `analytics/flows.py::cin_flows` | Flex `ChangeInNAV`: `depositsWithdrawals + assetTransfers`, en la fecha CIN |
+| TWR acumulado / anualizado | `/performance/twr` (`?summary=1` sin serie) | `analytics/twr.py::twr_series` | Encadenado del `twr` diario de IBKR (`ChangeInNAV`); divisas vía `fx_rates` |
+| XIRR (money-weighted) | `/performance/xirr` | `analytics/xirr.py::xirr_summary` | pyxirr sobre flujos CIN + NAV terminal; `null` bajo 365 días |
 | Serie S&P 500 | `/performance/benchmark` | `benchmarks/sp500.py::fetch_sp500_in_currency` | Yahoo Finance `^GSPC` (índice de **precio**) |
-| Comparativa cartera vs S&P | `/performance/vs-benchmark` | `analytics/risk.py::vs_benchmark` | TWR propio + benchmark muestreado en las mismas fechas |
+| Comparativa cartera vs S&P | `/performance/vs-benchmark` | `analytics/risk.py::vs_benchmark` | misma serie CIN + S&P emparejados en fechas comunes, rebasados a 100 |
 | Sharpe/Sortino/MaxDD/vol/Calmar | `/performance/risk` | `analytics/risk.py::risk_metrics` | Flex `ChangeInNAV` (campo `twr` diario pre-calculado por IBKR) |
-| Alpha/Beta | `/performance/alpha` | `analytics/risk.py::alpha_vs_benchmark` | regresión retornos diarios cartera vs benchmark |
+| Alpha/Beta | `/performance/alpha` | `analytics/risk.py::alpha_vs_benchmark` | regresión sobre retornos emparejados, una sola divisa |
 | Concentración HHI del libro OPT | `/options/concentration` | `analytics/options.py::options_concentration` | Flex `OpenPositions` / `positions_eod` del último snapshot OPT |
+| Liquidez (% del NAV en caja) | `/portfolio/margin` (`cash_pct_nlv`) | `analytics/margin.py::margin_summary` | Flex `EquitySummaryByReportDateInBase` (`cash` / `total`) |
+| Caja por divisa (Cartera) | `/portfolio/margin` (`cash_by_currency`) | `analytics/margin.py::margin_summary` | Flex `CashReport` (`endingCash`) × `ConversionRates` (`fx_rates`) |
 
 ---
 
@@ -28,7 +30,7 @@
 día y cuenta, en divisa base (CHF). Parser: `flex/parser.py::_parse_nav`
 (acepta también la variante legacy `EquitySummaryInBase` de configuraciones
 antiguas). Loader: `loaders/pipeline.py::_load_nav`, upsert-replace con clave
-`(snapshot_date, account_id)` — re-ingestas no duplican (VISION principio 4).
+`(snapshot_date, account_id)` — re-ingestas no duplican (idempotencia).
 
 Campos persistidos (todos directos del XML, sin transformación):
 
@@ -40,105 +42,104 @@ Campos persistidos (todos directos del XML, sin transformación):
   columnas (eso duplicaría el accrual en cualquier waterfall posterior).
 - `interestAccruals` (o legacy `interestReceivable`) → `interest_receivable`.
 
-### External cashflow (regla settle-date + FX)
+### Flujos externos (`analytics/flows.py`)
 
-`nav_daily.external_cashflow` se deriva de `CashTransaction` con
-`type ∈ {"Deposits/Withdrawals", "Internal Transfers"}`. La derivación canónica
-es **una sola función** — `_external_cashflows_by_settle_date` en
-`loaders/pipeline.py` — compartida por las dos vías de escritura:
+La **única** definición de flujo externo para TWR (reconciliación), XIRR,
+retorno all-time y waterfall es la de Flex `ChangeInNAV`, en divisa base y en
+la **fecha CIN** (la misma fecha en que IBKR registra el salto de NAV):
 
-- `_refresh_external_cashflows`: por statement, en cada ingesta.
-- `reconcile_external_cashflows`: re-deriva el histórico completo desde la
-  tabla `cash_transactions` y pone a 0 los residuos (fechas que tuvieron flujo
-  pero ya no tienen transacción que lo respalde).
+```
+flujo_t = depositsWithdrawals_t + assetTransfers_t
+```
 
-Reglas de la derivación:
-
-1. **El flujo se contabiliza en su `settle_date`**, no en `event_datetime`:
-   el NAV de IBKR (`EquitySummaryByReportDateInBase`) registra el depósito a
-   liquidación. Fechar por evento desalinea flujo y salto de NAV y produce
-   retornos Dietz espurios (observado: −85 % vs +50 % real).
-2. Filas sin `settle_date` o sin `fxRateToBase` se omiten (espejo del
-   `SUM(amount * fx)` SQL, que descarta productos NULL).
-3. Conversión a divisa base: `amount × fxRateToBase` — ambos campos Flex, sin
-   tipo de cambio inventado.
-4. Filas resumen de IBKR (`account_id == "-"`) se descartan.
-
-Un depósito cuyo settle cae en un día **sin** snapshot NAV crea una fila
-`nav_daily` "solo-cashflow" (`nav_total` NULL). Cómo la trata el TWR: §2.
+- `assetTransfers` son aportes **en especie** (ACATS / FOP / traspasos internos
+  de títulos). Suben el NAV sin ser rendimiento: tratarlos como beneficio
+  inflaba el XIRR (13,5 % vs 7,5 %) y el retorno absoluto (23,7 % vs 13,6 %).
+  El parser los guarda en `change_in_nav_daily.asset_transfers` (junto con
+  `sales_tax`); datos antiguos: CLI `backfill-cin-columns` desde `raw_xml`.
+- `cash_transactions` **no** se usa para flujos: se fecha por `settle_date`
+  (desfasada 1 día respecto al NAV en 12 de 51 depósitos, lo que fabricaba
+  ganancias/pérdidas de ±30 % en días sueltos) y no recoge las transferencias
+  en especie. La suma `Σ CIN depositsWithdrawals / Σ cash D/W` cuadra a 1,000
+  (control previo a `drop-csv-flow-rows`).
+- `nav_daily.external_cashflow` (derivado de `Deposits/Withdrawals` por
+  `settle_date`) queda como columna **heredada**: ningún cálculo la lee.
+  `Internal Transfers` (tipo muerto, 0 filas) se eliminó.
+- El loader ya no crea filas `nav_daily` "solo-cashflow" (`nav_total` NULL):
+  solo refleja el flujo sobre filas NAV existentes. Los residuos antiguos se
+  borran con `drop-navless-nav-rows` (p. ej. 2023-11-18).
 
 ---
 
-## 2. TWR — Modified Dietz diario encadenado (`analytics/twr.py`)
+## 2. TWR — IBKR `ChangeInNAV.twr` encadenado (`analytics/twr.py`)
 
-Para cada día *t* con NAV de apertura, NAV de cierre y cashflow externo CF
-(depósitos positivos, retiradas negativas):
+**Método canónico (decisión D2, 2026-10)**: el retorno diario en divisa base
+(CHF) es el campo `twr` de la fila `ChangeInNAV` de ese día — IBKR lo calcula
+con flujos aislados — y el TWR del periodo es su encadenado:
 
 ```
-r_t = (NAV_close − NAV_open − CF) / (NAV_open + 0.5 · CF)
-TWR del periodo = ∏(1 + r_t) − 1
+TWR = ∏(1 + twr_t / 100) − 1
 ```
 
-`NAV_open` es el `nav_total` del día anterior **con NAV**. La fórmula coincide
-con el Time-Weighted Return de PortfolioAnalyst de IBKR.
+La serie es **densa** (una fila por día hábil desde 2023-11-20, 751 filas;
+cobertura de calendario ≈ 0,7 por fines de semana). No existe tramo "disperso":
+las notas antiguas sobre NAV anual pre-2026 eran falsas.
 
-- **Días sin NAV (filas solo-cashflow)**: el CF se acumula en `pending_cf` y se
-  arrastra al siguiente día que sí tiene NAV. Así el salto de NAV causado por
-  un depósito liquidado fuera de snapshot no se contabiliza como rendimiento
-  (fix 2026-06-10; antes la fila fantasma rompía la cadena).
-- **Warm-up skip**: las filas iniciales con NAV < `max(100, 0.5 % del NAV
-  máximo del periodo)` se omiten (`warmup_skipped` en la respuesta). Un saldo
-  promocional de apertura seguido del primer depósito real explota Modified
-  Dietz con retornos de "miles de por ciento" sin sentido.
-- **Anualización**: `(∏(1 + r_t))^(365 / n_days) − 1`, solo si `n_days > 0` y
-  el acumulado es positivo.
+- **Ventanas acotadas**: la fila fechada *t* es el retorno **del día t**. Una
+  ventana `[start, end]` encadena las filas dentro del rango; el día 1 entra
+  (MTD incluye el día 1). `base_date` es la última fila CIN estrictamente
+  anterior a `start` (sin ella: el día previo a la primera fila) y es el ancla
+  del benchmark.
+- **Divisa de visualización X** (`analytics/fx.py::fx_lookup`): se convierten los
+  retornos CHF con la serie `fx_rates` de IBKR (mismas fechas y valoración que
+  el NAV; `fx` = unidades de X por 1 CHF):
+
+  ```
+  r_X,t = (1 + r_CHF,t) · fx_t / fx_{t−1} − 1
+  ```
+
+  Fuente de respaldo **marcada**: si `fx_rates` no tiene serie para la divisa
+  se usa Frankfurter (BCE) con `fx_degraded: true` / `fx_source: "frankfurter"`;
+  si tampoco hay tasa, las cifras convertidas son `null` (nunca 1.0 silencioso).
+  Cada respuesta lleva `fx_source` (`identity`, `ibkr_fx_rates`, `frankfurter`).
+- **Anualización**: `(∏(1 + r_t))^(365 / n_days) − 1` **solo** con
+  `n_days ≥ 365` (GIPS prohíbe anualizar periodos < 1 año); si no,
+  `annualised_pct = null` y `annualised_note` lo explica. `n_days` son días
+  naturales desde `base_date` hasta la última fila.
 - **Quality gate** (`_series_quality`): cobertura < 50 % de los días naturales
-  del rango o un hueco > 10 días entre snapshots → `is_reliable: false`. En ese
-  caso `twr_pct` y `annualised_pct` se publican como `null` y los valores crudos
-  quedan en `raw_twr_pct` / `raw_annualised_pct` — la cifra dudosa nunca se
-  presenta como fiable.
-
-### Conversión de divisa (`analytics/fx.py`)
-
-Si `display_currency` ≠ CHF (base de la cuenta), cada NAV y CF se convierte al
-spot **del día del snapshot** antes de aplicar Dietz — esto aísla el efecto de
-apreciación/depreciación del CHF del retorno.
-
-- Fuente: Frankfurter.app (datos BCE, gratuito, sin auth). Fines de semana y
-  festivos resuelven al día hábil BCE anterior.
-- Cache en memoria **solo de tasas reales** (los históricos son inmutables, no
-  caduca). Si la API falla, esa llamada degrada a 1.0 **sin cachear el fallo**:
-  la siguiente llamada reintenta (fix B3 2026-06-10; antes un fallo transitorio
-  fijaba 1.0 para esas fechas durante toda la vida del proceso, produciendo
-  series mixtas convertidas/sin convertir).
+  del rango o un hueco > 10 días → `is_reliable: false`; `twr_pct` y
+  `annualised_pct` se publican `null` y el valor crudo queda en `raw_twr_pct`.
+- **Modified Dietz = solo reconciliación** (`reconciliation`, columna
+  `dietz_cumulative_pct` en la serie CHF): `r = (fin − inicio − CF) / (inicio +
+  0,5·CF)` con `CF = depositsWithdrawals + assetTransfers` en la fecha CIN,
+  encadenado sobre las mismas filas. `diff_pp` frente al canónico es un control
+  (≈ 0,09 pp en el histórico completo); el canónico manda.
+- **`?summary=1`**: omite la serie diaria (< 2 KB en lugar de ≈ 100 KB); las
+  cifras de cabecera son idénticas. Rentabilidad, Resumen y el pulso de
+  Telegram usan el modo resumen sobre la misma serie.
+- Test de regresión: `|app − ∏ CIN| < 0,1 pp` por año natural.
 
 ---
 
 ## 3. XIRR — retorno money-weighted (`analytics/xirr.py`)
 
-Resuelto con la librería `pyxirr`. Equivale al Money-Weighted Return de
-PortfolioAnalyst.
+Resuelto con la librería `pyxirr`.
 
-- **Flujos**: `cash_transactions` con los mismos tipos que el TWR
-  (`Deposits/Withdrawals`, `Internal Transfers`), en divisa base
-  (`amount × fxRateToBase`; si falta `fxRateToBase` el flujo entra **sin
-  convertir** — `coalesce(fx, 1)`), fechados por `settle_date` (fallback
-  `event_datetime` si falta). Nótese que esta regla es más laxa que la del
-  `external_cashflow` del TWR (§1), que omite esas filas — ver §8.5.
+- **Flujos**: `flujo_t = depositsWithdrawals + assetTransfers` por fecha CIN
+  (`analytics/flows.py`), en divisa base — sin `fxRateToBase` NULL ni fechas
+  de liquidación.
 - **Convención de signos** (necesaria para que pyxirr converja): depósitos
   negativos (capital que entra a la inversión), retiradas positivas, NAV
-  terminal positivo. Como `CashTransaction.amount` guarda depósitos en positivo
-  (vista pasivo-del-broker), se niega el signo al construir la lista.
-- **NAV terminal**: último `nav_daily.nav_total` no nulo ≤ `period.end` — las
-  filas solo-cashflow se excluyen explícitamente (`nav_total IS NOT NULL`).
+  terminal positivo.
+- **NAV terminal**: último `nav_daily.nav_total` no nulo ≤ `period.end`.
 - **Síntesis de inversión inicial en sub-periodos**: si `period.start` está
   acotado, se inserta un flujo negativo igual al último NAV anterior a
-  `period.start` fechado en `period.start`. Sin esto, pyxirr atribuye toda la
-  riqueza acumulada al inicio del periodo a los pocos depósitos hechos dentro
-  de él, produciendo tasas absurdas (+1.000.000 %). El XIRR all-time
-  (`period.start` = None) no necesita la síntesis. Si no existe NAV anterior al
-  inicio, la respuesta lo declara en `note` (resultado probablemente
-  infraestimado) en vez de fingir precisión.
+  `period.start` fechado en `period.start`. Sin NAV previo, `note` lo declara.
+- **No se anualiza bajo 365 días**: con ventana < 365 días `xirr_pct = null`,
+  `annualised: false` y `window_days` informa de la longitud.
+- `/portfolio/all-time-return` devuelve el
+  mismo `xirr_pct` en lugar del antiguo `cagr_pct`, que suponía todos los
+  aportes hechos en la fecha de inicio.
 
 ---
 
@@ -147,10 +148,12 @@ PortfolioAnalyst.
 - **Fuente**: Yahoo Finance (API v8 chart, JSON gratuito sin auth), símbolo
   `^GSPC` — el índice S&P 500 **de precio**. **No es total return**: no
   reinvierte dividendos. Implicaciones de honestidad en §6.
-- **Conversión USD→CHF** (o EUR/GBP/JPY): serie diaria `USDCHF=X` de Yahoo
-  (semántica: CHF por 1 USD), `close_base = close_USD × fx`. En días en que la
-  bolsa abre pero el mercado FX no publica, el FX se rellena hacia delante
-  (forward-fill) con el último valor conocido.
+- **Conversión USD→CHF** (o EUR/GBP/JPY): con la tabla `fx_rates` de IBKR (la
+  misma que convierte la cartera; fechas y valoración del NAV), `close_base =
+  close_USD × fx(USD→CHF) / fx(X→CHF)`; el FX se rellena hacia delante
+  (as-of) en días sin tipo. Solo si `fx_rates` no tiene serie para la divisa se
+  usa `USDCHF=X` de Yahoo, y las filas llevan `fx_source: "yahoo"` (las barras
+  Yahoo vienen fechadas en UTC y en invierno se desplazan un día: β 0,69 vs 0,73).
 - **Normalización**: índice = 100 en el primer día de la ventana;
   `return_pct` = retorno acumulado desde ese día. Directamente superponible a
   una serie TWR porcentual.
@@ -169,49 +172,54 @@ PortfolioAnalyst.
 
 ## 5. Comparativa honesta `/performance/vs-benchmark` (`analytics/risk.py::vs_benchmark`)
 
-Modelo de honestidad (VISION principio 5):
+Modelo de honestidad:
 
-1. **Mismas fechas exactas**: el benchmark se muestrea solo en las fechas donde
-   la cartera tiene punto TWR, con regla *as-of* (último cierre del benchmark ≤
-   esa fecha). Donde el NAV es disperso (pre-2026 = snapshots anuales), AMBAS
-   líneas son rectas entre los mismos puntos — nunca una curva suave de cartera
-   contra un índice diario dentado.
-2. **Rebase común**: ambas series se reescalan a 100 en la primera fecha común.
-3. **Guard de fiabilidad**: si la calidad del TWR subyacente es `is_reliable:
-   false` (cobertura NAV insuficiente, ver §2), la comparación de nivel **no se
-   publica** — la respuesta lleva `is_reliable: false` con la razón y los datos
-   de resolución, en vez de un número engañoso.
-4. **Dos capas, cada una honesta sobre su ventana**:
-   - `level_comparison`: retorno total cartera vs benchmark sobre la ventana
-     común completa (ratio de extremos de las series rebasadas).
-   - `risk_comparison`: beta, Jensen alpha, tracking error e information ratio,
-     calculados **solo** sobre el segmento de resolución diaria
-     (`ChangeInNavDaily`, ≥ 30 días alineados) — nunca sobre tramos dispersos.
-5. **Flags de resolución** en la respuesta: `points`, `max_gap_days`,
-   `is_sparse` (hueco máximo > 7 días), `daily_segment_from` (inicio del tramo
-   denso fiable) y una nota legible para el usuario.
+1. **Una serie, unas fechas**: cartera (CIN, en la divisa pedida vía `fx_rates`)
+   y S&P (convertido con la misma `fx_rates`) se emparejan en las fechas donde
+   **ambos** tienen valor (`_pair_returns`). Los retornos se **componen** entre
+   fechas comunes: un festivo de EE. UU. compone el día de la cartera en la
+   siguiente fecha común y un festivo suizo compone el movimiento del S&P —
+   ningún día de la cartera se descarta (751 días → 720 pares en el histórico).
+2. **Rebase común**: ambas líneas valen 100 en `base_date` (último NAV antes
+   del periodo); el S&P usa su último cierre ≤ `base_date` (se pide desde
+   `base_date − 7 d`), de modo que el día 1 cuenta aunque el periodo empiece en
+   festivo.
+3. **Guard de fiabilidad**: calidad del TWR `is_reliable: false` → la
+   comparación no se publica.
+4. **Una cifra de retorno y un exceso**: `level_comparison` sale de los mismos
+   pares que `risk_comparison` y los puntos del gráfico; su
+   `portfolio_return_pct` coincide con `/performance/twr?summary=1`.
+5. **Una divisa**: beta, alpha de Jensen, tracking error e IR se calculan con
+   retornos de cartera convertidos a la divisa del benchmark.
+   `/performance/risk` corre en CHF (`currency` en la respuesta).
+6. Etiquetas: `benchmark_type: "price index (^GSPC), not total return"`,
+   `fx_source` / `benchmark_fx_source`.
 
-`/performance/alpha` aplica el mismo principio: beta/Jensen alpha solo con
-≥ 30 días alineados. Con 5–29 días, beta y Jensen quedan `null` pero se reporta
-la diferencia simple de retornos (`simple_alpha_pct`) con `is_reliable: true`.
-Solo con < 5 días alineados la respuesta es `is_reliable: false` (sin cifras).
+`/performance/alpha`: beta/Jensen solo con ≥ 30 pares; con 5–29, solo
+diferencia simple. Con < 5 pares: `is_reliable: false`.
 
 ---
 
 ## 6. Métricas de riesgo `/performance/risk` (`analytics/risk.py::risk_metrics`)
 
-- **Fuente**: `ChangeInNavDaily.twr` — el TWR diario que **IBKR pre-calcula**
-  (sección Flex `ChangeInNAV`), no una derivación propia. Es la serie densa y
-  limpia; en esta cuenta solo existe desde enero 2026.
-- Sharpe, Sortino, volatilidad anualizada (√252), max drawdown (con fechas
-  pico/valle), Calmar. Mínimo 10 días de muestra; por debajo, todo `null` con
-  `is_reliable: false`.
-- **Flags de truncamiento**: si la ventana pedida excede la cobertura de
-  `ChangeInNAV` (p. ej. "all-time" desde 2023), la respuesta lleva
-  `is_truncated: true` + la ventana realmente usada — sin truncamiento
-  silencioso.
-- `risk_free_rate_pct` es parámetro explícito (default 0 → Sharpe se reduce a
-  retorno/volatilidad); referencia CHF: SARON 1M ≈ 0,95 % a inicios de 2026.
+- **Fuente**: `ChangeInNavDaily.twr` (la misma serie que el TWR canónico).
+- **Anualización en tiempo de calendario**: observaciones/año = `n / (días
+  naturales / 365)` (CIN tiene 261–262 filas/año, no 252). Volatilidad y
+  semidesviación con `√obs/año`.
+- **Menos de 365 días**: `annualised_return_pct` y Calmar son `null`
+  (`annualised: false`); Sharpe/Sortino usan la media aritmética diaria
+  (`sharpe_method: "arithmetic"`) en lugar de extrapolar. Desde 1 año se usa
+  el retorno anualizado geométrico (`"geometric"`).
+- **Tasa libre de riesgo**: tabla CHF por año **documentada y configurable**,
+  por defecto **0 %** (sin descarga externa). Variable de entorno
+  `RISK_FREE_CHF_PCT_BY_YEAR="2023:1.7,2024:1.2"`; el parámetro
+  `risk_free_rate_pct` de la ruta la sustituye. La respuesta indica
+  `risk_free_source`. Con 0 %, Sharpe = retorno/volatilidad.
+- Max drawdown (con fechas pico/valle). Mínimo 10 días; por debajo, todo
+  `null` con `is_reliable: false`.
+- **Truncamiento**: `is_truncated` solo si la primera fila diaria empieza más
+  de 5 días naturales después del inicio pedido (all-time = primer NAV con
+  valor) o la ventana termina > 7 días después de la última fila.
 
 ---
 
@@ -287,29 +295,53 @@ para no requerir rebootstrap de la base SQLite viva.
    aproximadamente el dividend yield del S&P 500 (del orden de 1–2 puntos
    porcentuales anuales). Un "gano al S&P por 1 punto" puede ser empate o
    pérdida contra el índice total-return.
-2. **Dos fuentes de FX distintas.** La cartera convierte con Frankfurter (BCE);
-   el benchmark con las series `=X` de Yahoo. Fixings distintos → pequeñas
-   discrepancias diarias posibles entre ambas líneas, no atribuibles a
-   rendimiento.
-3. **Degradación FX a 1.0.** Si Frankfurter no responde, esa respuesta concreta
-   mezcla valores convertidos y sin convertir (no se cachea el fallo; el
-   siguiente request reintenta). Afecta solo a vistas con `currency` ≠ CHF.
-4. **NAV histórico disperso pre-2026.** Snapshots aproximadamente anuales hasta
-   2025: los tramos antiguos del TWR son rectas entre pocos puntos y las
-   métricas de riesgo no existen ahí. Los flags `quality`, `is_sparse` e
-   `is_truncated` lo declaran en cada respuesta.
-5. **Cashflows con datos incompletos — TWR y XIRR difieren.** Transacciones sin
-   `settle_date` o sin `fxRateToBase` no entran en `external_cashflow` (regla
-   deliberada, §1) y por tanto tampoco en el TWR. El XIRR en cambio **sí las
-   incluye**: usa `event_datetime` como fallback de fecha y `coalesce(fx, 1)`
-   (el flujo entra sin convertir). Al reconciliar TWR contra XIRR, ese descuadre
-   es esperado. La reconciliación (`reconcile_external_cashflows`) es la red de
-   seguridad si IBKR dejara de poblar esos campos.
-6. **Warm-up excluido.** El TWR no cubre el periodo inicial de saldo
-   promocional (§2); `warmup_skipped` indica cuántas filas se saltaron.
+2. **Una sola fuente de FX.** Cartera y benchmark convierten con `fx_rates`
+   de IBKR. Solo si falta la serie de una divisa se recurre a Frankfurter
+   (cartera) o Yahoo (benchmark), siempre con `fx_degraded` / `fx_source`.
+3. **Sin tipo de cambio, sin cifra.** Si no hay tasa para una divisa, los
+   retornos convertidos son `null`; nunca se sustituyen por 1.0.
+4. **Histórico denso, no disperso.** `ChangeInNAV` cubre cada día hábil desde
+   2023-11-20; los flags `quality` e `is_truncated` siguen declarando huecos
+   reales si apareciesen.
+5. **Benchmark sin dividendos y tasa libre de riesgo 0 %.** `^GSPC` es de
+   precio (decisión D4: se mantiene) y Sharpe/IR no restan SARON salvo que se
+   configure la tabla anual (§6).
+6. **Dietz ≠ canónico.** La columna de reconciliación (Dietz sobre filas CIN)
+   difiere del `twr` de IBKR en décimas de punto; manda el de IBKR.
 7. **Dependencia de APIs externas sin SLA** (Yahoo, Frankfurter). Los fallos no
    se rellenan con datos inventados: con la caché `benchmark_daily` vacía,
    `/performance/benchmark` devuelve 502; con caché poblada se sirve lo
    persistido — que puede ser una serie **parcial** si el tramo no cacheado no
    se pudo fetchear (misma señalización de fiabilidad que una ventana corta de
    Yahoo). Las rutas de comparación declaran fiabilidad vía `is_reliable`.
+
+---
+
+## 9. Liquidez y caja por divisa (`/portfolio/margin`)
+
+Añadido 2026-11-18. Dos cifras del mismo snapshot EOD; ninguna es una estimación Reg-T.
+
+**Liquidez** (`cash_pct_nlv`) = `nav_daily.cash / nav_daily.nav_total × 100`, del último
+snapshot NAV. `cash` es la caja del NAV de IBKR: ya resta la deuda de cada divisa. Por eso
+la cifra puede ser negativa si la deuda supera a la caja.
+
+**Caja por divisa** (`cash_by_currency`): una fila por divisa del `CashReport` del mismo día.
+
+- `ending_cash`: saldo en la divisa (`endingCash`). Negativo = deuda de margen (`is_debt`).
+- `ending_cash_base`: `ending_cash × tasa`, con la tasa de `fx_rates` (Flex `ConversionRates`)
+  vigente el día del snapshot, vía `FxTable`. Sin tasa de IBKR el valor es `null`; nunca 1,0
+  ni una fuente externa.
+- `pct_of_nav`: `ending_cash_base / nav_total × 100`, la misma base que el `% NAV` de las
+  posiciones.
+
+La suma de `ending_cash_base` coincide con `nav_daily.cash` salvo redondeo.
+
+Dónde se ve:
+
+| Superficie | Qué muestra |
+|---|---|
+| Resumen, franja de riesgo | chip «Liquidez» (`cash_pct_nlv`) |
+| Margen | KPI «Liquidez (cash / NLV)» con el importe de caja |
+| Cartera, «Posiciones actuales» | filas `CASH <divisa>` al final: saldo en la divisa, valor en base, `% NAV` |
+| Telegram, «Uso de margen» (semanal) | línea «Liquidez: X% del patrimonio en caja (N <base> netos)» |
+

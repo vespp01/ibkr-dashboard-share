@@ -24,3 +24,15 @@ echo
 echo "IBKR Dashboard is ready at:"
 echo "  dashboard: http://localhost:5173"
 echo "  API docs:  http://localhost:8001/docs"
+
+# Ports bind to 127.0.0.1 only; publish the dashboard on the tailnet (idempotent).
+frontend_addr="$(docker compose port frontend 80)"   # e.g. 127.0.0.1:5173
+frontend_port="${frontend_addr##*:}"
+ts="$(command -v tailscale || true)"
+[ -n "$ts" ] || [ ! -x /Applications/Tailscale.app/Contents/MacOS/Tailscale ] || ts=/Applications/Tailscale.app/Contents/MacOS/Tailscale
+serve_cmd="tailscale serve --bg --tcp $frontend_port tcp://$frontend_addr"
+if [ -n "$ts" ] && "$ts" serve --bg --tcp "$frontend_port" "tcp://$frontend_addr" >/dev/null 2>&1; then
+  echo "  tailnet:   http://$("$ts" ip -4 | head -n 1):$frontend_port"
+else
+  echo "  tailnet:   not published; run '$serve_cmd' to reach it over Tailscale"
+fi

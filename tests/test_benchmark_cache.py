@@ -150,25 +150,39 @@ def test_fetches_only_leading_missing_range(monkeypatch):
 
 
 def test_upsert_pk_constraint_prevents_duplicates(monkeypatch):
-    """Overlapping upserts don't create duplicate rows (PK date+symbol).
+    """A fetch that overlaps cached days upserts them: no duplicate PKs.
 
-    Pre-seed 5 days at close=6000, then fetch an 8-day window at close=7000.
-    The DB should end up with exactly 8 rows (not 5+3+5=13), proving the
-    ON CONFLICT DO UPDATE path fires correctly on the overlapping 5 days.
+    Cache days 0,1,2 and 8,9 at close 5000+i (interior gap of 6 days > the
+    4-day tolerance), so a 0..9 window forces a full re-fetch of [0, 9] at
+    close=7000. That fetch overlaps the 5 cached days. Expected: 10 unique
+    (date, symbol) rows (not 5 + 10 = 15), and every one holds 7000 because the
+    ON CONFLICT DO UPDATE replaced the old closes (seeded 5000, 5001, 5002,
+    5008, 5009).
     """
-    _seed_benchmark(days=5)
+    _seed_benchmark(days=3)
+    _seed_benchmark(days=2, start=START + timedelta(days=8))
     assert _count("^GSPC") == 5
 
     calls: list = []
-    # The fetcher returns close=7000 for whatever range it's asked.
     monkeypatch.setattr(sp500, "_yahoo_fetch", _fake_yahoo_factory(calls, close="7000"))
 
-    end = START + timedelta(days=7)
+    end = START + timedelta(days=9)
     rows = sp500.fetch_sp500_in_currency("CHF", START, end)
 
-    # Only 8 unique date+symbol PKs — no duplicates despite the 5-day overlap.
-    assert _count("^GSPC") == 8, "upsert must not insert duplicate PKs"
-    assert len(rows) == 8
+    # The fetch really overlapped the cache: one request over the whole window.
+    assert [c for c in calls if c[0] == "^GSPC"] == [("^GSPC", START, end)]
+    # 10 unique date+symbol PKs: no duplicates despite the 5-day overlap.
+    assert _count("^GSPC") == 10, "upsert must not insert duplicate PKs"
+    assert len(rows) == 10
+    with session_scope() as s:
+        closes = {
+            d: c for d, c in s.execute(
+                select(BenchmarkDaily.price_date, BenchmarkDaily.close)
+                .where(BenchmarkDaily.symbol == "^GSPC")
+            ).all()
+        }
+    assert sorted(closes) == [START + timedelta(days=i) for i in range(10)]
+    assert all(c == Decimal("7000") for c in closes.values()), "overlap rows must be overwritten"
 
 
 # ---------------------------------------------------------------------------

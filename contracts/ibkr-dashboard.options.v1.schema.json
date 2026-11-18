@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.local/ibkr-dashboard.options.v1.schema.json",
+  "title": "IBKR Dashboard open option legs v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "producer",
+    "generated_at",
+    "as_of",
+    "status",
+    "days_stale",
+    "legs",
+    "warnings"
+  ],
+  "properties": {
+    "schema_version": { "const": "ibkr-dashboard.options.v1" },
+    "producer": { "const": "ibkr-dashboard" },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "as_of": { "type": ["string", "null"], "format": "date" },
+    "status": { "enum": ["ready", "stale", "blocked"] },
+    "days_stale": { "type": ["integer", "null"], "minimum": 0 },
+    "legs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/leg" }
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[A-Z0-9_]+$" },
+      "uniqueItems": true
+    }
+  },
+  "if": { "properties": { "status": { "const": "blocked" } } },
+  "then": { "properties": { "legs": { "maxItems": 0 } } },
+  "else": {
+    "properties": {
+      "as_of": { "type": "string" },
+      "days_stale": { "type": "integer" }
+    }
+  },
+  "$defs": {
+    "leg": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "conid",
+        "underlying",
+        "right",
+        "strike",
+        "expiry",
+        "multiplier",
+        "quantity",
+        "currency",
+        "avg_cost_per_share",
+        "mark_price"
+      ],
+      "properties": {
+        "conid": { "type": "integer", "minimum": 1 },
+        "underlying": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "right": { "enum": ["P", "C"] },
+        "strike": { "type": "number", "exclusiveMinimum": 0 },
+        "expiry": { "type": "string", "format": "date" },
+        "multiplier": { "type": "integer", "minimum": 1 },
+        "quantity": { "type": "number", "not": { "const": 0 } },
+        "currency": { "type": "string", "pattern": "^[A-Z]{3}$" },
+        "avg_cost_per_share": {
+          "description": "Open price per share in the contract currency, from IBKR costBasisMoney (commissions included); null when not trustworthy.",
+          "type": ["number", "null"],
+          "exclusiveMinimum": 0
+        },
+        "mark_price": { "type": ["number", "null"] }
+      }
+    }
+  }
+}

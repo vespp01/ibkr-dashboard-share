@@ -1,10 +1,14 @@
 """S&P 500 fetcher in arbitrary base currency.
 
-Source: Yahoo Finance v8 chart API (free JSON, no auth). The fetcher converts
-USD prices to the requested currency on a date-by-date basis using Yahoo's
-USD/<ccy>=X series for the same window. Output is a normalised index where
-the first day equals 100, so it's directly comparable to a TWR percentage
-series.
+Source: Yahoo Finance v8 chart API (free JSON, no auth) for the index level
+(`^GSPC`, price-only; decision D4 keeps it). The fetcher converts USD prices
+to the requested currency on a date-by-date basis with the IBKR `fx_rates`
+table (USD→CHF and CHF→<ccy>, same report dates and valuation as the NAV), so
+portfolio and benchmark share one FX source. Only when `fx_rates` has no
+series for the currency does it fall back to Yahoo's USD/<ccy>=X bars; those
+rows are flagged `fx_source: "yahoo"` (the UTC-dated bars drift one day vs the
+NAV in winter — B11). Output is a normalised index where the first day equals
+100, so it's directly comparable to a TWR percentage series.
 
 Persistence: daily closes are cached in the `benchmark_daily` table with an
 idempotent upsert — each call fetches from Yahoo only the date range missing
@@ -28,6 +32,7 @@ from sqlalchemy.orm import Session
 
 from ..db import session_scope
 from ..db.models import BenchmarkDaily
+from ..analytics.fx import fx_lookup as fx_rates_lookup
 from ..loaders._upsert import upsert_replace
 
 log = logging.getLogger(__name__)
@@ -256,20 +261,35 @@ def fetch_sp500_in_currency(
     # SPX rows that were successfully persisted in the same transaction.
     with session_scope() as session:
         spx = _cached_fetch(session, _YAHOO_SYMBOL["^spx"], "USD", from_date, to_date)
-    if currency != "USD" and spx:
-        fx_yahoo = _YAHOO_SYMBOL[f"usd{currency.lower()}"]
-        with session_scope() as session:
-            fx_series = _cached_fetch(session, fx_yahoo, currency, from_date, to_date)
     if not spx:
         return []
 
     fx_lookup: dict[date, Decimal] = {}
+    fx_source = "identity"
     if currency == "USD":
         # Identity; no FX needed.
         for d, _ in spx:
             fx_lookup[d] = Decimal("1")
     else:
-        fx_lookup = _build_fx_lookup(fx_series)
+        # Primary: IBKR fx_rates (same dates/valuation as the NAV).
+        with session_scope() as session:
+            look = fx_rates_lookup(
+                session, [d for d, _ in spx], "USD", currency, allow_fallback=False
+            )
+        if look["source"] == "ibkr_fx_rates" and not look["missing"]:
+            fx_lookup = {d: Decimal(str(r)) for d, r in look["rates"].items()}
+            fx_source = "ibkr_fx_rates"
+        else:
+            # Flagged fallback: Yahoo USD/<ccy>=X bars (UTC-dated; B11).
+            log.warning(
+                "No fx_rates for USD→%s in window %s..%s; falling back to Yahoo FX",
+                currency, from_date, to_date,
+            )
+            fx_yahoo = _YAHOO_SYMBOL[f"usd{currency.lower()}"]
+            with session_scope() as session:
+                fx_series = _cached_fetch(session, fx_yahoo, currency, from_date, to_date)
+            fx_lookup = _build_fx_lookup(fx_series)
+            fx_source = "yahoo"
         if not fx_lookup:
             log.warning(
                 "No FX data for usd%s in window %s..%s", currency.lower(), from_date, to_date
@@ -298,5 +318,6 @@ def fetch_sp500_in_currency(
             "close_base": float(close_base),
             "index": float(index),
             "return_pct": float(return_pct),
+            "fx_source": fx_source,
         })
     return rows

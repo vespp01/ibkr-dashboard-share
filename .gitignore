@@ -95,3 +95,7 @@ docker-compose.override.yaml
 
 # Carpeta de fuentes/insumos locales (NUNCA commitear — contiene exports con secretos)
 .nogit/
+
+# Watchdog diagnostic dumps (py-spy / faulthandler on a scheduler wedge)
+deploy/watchdog/dumps/*
+!deploy/watchdog/dumps/.gitkeep

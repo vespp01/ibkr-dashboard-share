@@ -1,0 +1,47 @@
+{
+  "schema_version": "ibkr-dashboard.options.v1",
+  "producer": "ibkr-dashboard",
+  "generated_at": "2026-08-02T08:30:00Z",
+  "as_of": "2026-08-01",
+  "status": "ready",
+  "days_stale": 1,
+  "legs": [
+    {
+      "conid": 900001,
+      "underlying": "SPY",
+      "right": "P",
+      "strike": 490.0,
+      "expiry": "2026-09-18",
+      "multiplier": 100,
+      "quantity": 1.0,
+      "currency": "USD",
+      "avg_cost_per_share": 0.85,
+      "mark_price": 0.6
+    },
+    {
+      "conid": 900002,
+      "underlying": "SPY",
+      "right": "P",
+      "strike": 500.0,
+      "expiry": "2026-09-18",
+      "multiplier": 100,
+      "quantity": -1.0,
+      "currency": "USD",
+      "avg_cost_per_share": 1.4895,
+      "mark_price": 1.1
+    },
+    {
+      "conid": 900003,
+      "underlying": "ACME",
+      "right": "C",
+      "strike": 30.0,
+      "expiry": "2026-10-16",
+      "multiplier": 100,
+      "quantity": -2.0,
+      "currency": "USD",
+      "avg_cost_per_share": null,
+      "mark_price": null
+    }
+  ],
+  "warnings": ["COST_BASIS_UNAVAILABLE"]
+}

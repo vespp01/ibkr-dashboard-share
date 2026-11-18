@@ -1,6 +1,6 @@
 """FX cache behaviour — network failures must not poison the in-memory cache.
 
-Regression tests for overnight finding #02: a transient Frankfurter outage used
+Regression tests: a transient Frankfurter outage used
 to cache rate=1.0 permanently, mixing converted and unconverted NAVs in the
 display-currency TWR series. Network I/O is simulated by monkeypatching
 ``urllib.request.urlopen`` (the fetch boundary); no DB is involved.

@@ -1,10 +1,11 @@
 import { useState } from 'react';
 import { useQuery, type UseQueryResult } from '@tanstack/react-query';
 import { Bar, BarChart, CartesianGrid, Cell, LabelList, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { api, type PeriodFilters } from '../lib/api';
+import { api, type MarginCashRow, type MarginSummaryResponse, type PeriodFilters } from '../lib/api';
 import { ChartTooltip } from '../components/ChartTooltip';
 import { MissingData } from '../components/MissingData';
-import { formatCompactCurrency, formatCurrency, formatPercent } from '../lib/format';
+import { QueryError } from '../components/QueryError';
+import { axisAmountFormatter, formatCompactCurrency, formatCurrency, formatPercent, isPrivacyModeEnabled, tooltipCurrencyFormatter } from '../lib/format';
 import { useI18n } from '../lib/i18n';
 
 const PIE_COLORS = [
@@ -41,6 +42,7 @@ const COPY = {
     attributionError: 'No se pudo cargar la atribución por símbolo. Reintenta o cambia de periodo.',
     attributionEmpty: 'Sin datos FIFO/MTM para este periodo. Activity Flex repobla estas filas a diario; revisa /data/coverage.',
     commissions: 'Comisiones',
+    cashTitle: 'Saldo de caja en la divisa (Flex EOD), convertido a la divisa base con el tipo de cambio de IBKR. Negativo = deuda de margen.',
   },
   en: {
     unavailableTitle: 'Portfolio unavailable',
@@ -66,6 +68,7 @@ const COPY = {
     attributionError: 'Could not load symbol attribution. Retry or change the period.',
     attributionEmpty: 'No FIFO/MTM data for this period. Activity Flex refreshes these rows daily; check /data/coverage.',
     commissions: 'Fees',
+    cashTitle: 'Cash balance in the currency (Flex EOD), converted to base at the IBKR FX rate. Negative = margin debt.',
   },
   de: {
     unavailableTitle: 'Portfolio nicht verfuegbar',
@@ -91,6 +94,7 @@ const COPY = {
     attributionError: 'Symbol-Attribution konnte nicht geladen werden. Wiederhole den Versuch oder aendere den Zeitraum.',
     attributionEmpty: 'Keine FIFO/MTM-Daten fuer diesen Zeitraum. Activity Flex aktualisiert diese Zeilen taeglich; pruefe /data/coverage.',
     commissions: 'Gebuehren',
+    cashTitle: 'Cash-Saldo in der Waehrung (Flex EOD), zum IBKR-Wechselkurs in die Basiswaehrung umgerechnet. Negativ = Margin-Schuld.',
   },
 } as const;
 
@@ -98,9 +102,11 @@ interface Props {
   filters: PeriodFilters;
   currency: string;
   positions: UseQueryResult<any[] | undefined>;
+  /** Shared with Resumen/Margen — source of the per-currency cash rows. */
+  marginQ: UseQueryResult<MarginSummaryResponse>;
 }
 
-export function CarteraPage({ filters, currency, positions }: Props) {
+export function CarteraPage({ filters, currency, positions, marginQ }: Props) {
   const { language, locale } = useI18n();
   const copy = COPY[language];
 
@@ -131,6 +137,13 @@ export function CarteraPage({ filters, currency, positions }: Props) {
     return <MissingData title={copy.unavailableTitle}>{copy.unavailableBody}</MissingData>;
   }
 
+  const cashRows: MarginCashRow[] = (marginQ.data && 'cash_by_currency' in marginQ.data ? marginQ.data.cash_by_currency : [])
+    .filter((r) => r.ending_cash !== 0)
+    .slice()
+    // Largest base value first; a row without a Flex FX rate (null base) goes last.
+    .sort((a, b) => (a.ending_cash_base == null ? 1 : 0) - (b.ending_cash_base == null ? 1 : 0)
+      || (b.ending_cash_base ?? 0) - (a.ending_cash_base ?? 0));
+
   const positionRows = (positions.data ?? [])
     .slice()
     .sort((a: any, b: any) => (b.position_value_base ?? 0) - (a.position_value_base ?? 0));
@@ -147,7 +160,7 @@ export function CarteraPage({ filters, currency, positions }: Props) {
         case 'value': return value;
         case 'pnl': return pnl;
         case 'pnl_pct': return cost > 0 ? (pnl / cost) * 100 : 0;
-        case 'pct_nav': return row.pct_of_nav ?? 0;
+        case 'pct_nav': return row.weight ?? 0;
         default: return 0;
       }
     };
@@ -205,13 +218,10 @@ export function CarteraPage({ filters, currency, positions }: Props) {
   }));
   const renderPieLabel = ({ name, percent }: { name?: string; percent?: number }) => {
     if (!name || percent === undefined || percent < 0.018) return '';
-    return `${name} ${(percent * 100).toFixed(1)}%`;
+    return isPrivacyModeEnabled() ? name : `${name} ${(percent * 100).toFixed(1)}%`;
   };
 
-  const currencyTooltipFormatter = (v: number | string) => {
-    if (typeof v === 'number') return `${currency} ${v.toLocaleString(locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-    return String(v);
-  };
+  const currencyTooltipFormatter = tooltipCurrencyFormatter(currency, locale);
 
   return (
     <div className="subsection-grid">
@@ -239,7 +249,7 @@ export function CarteraPage({ filters, currency, positions }: Props) {
           <BarChart data={portfolioChartData} barCategoryGap="24%" barGap={-34}>
             <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
             <XAxis dataKey="symbol" tick={{ fill: '#8b88a6', fontSize: 11 }} />
-            <YAxis tick={{ fill: '#8b88a6', fontSize: 11 }} />
+            <YAxis tick={{ fill: '#8b88a6', fontSize: 11 }} tickFormatter={axisAmountFormatter(locale)} />
             <Tooltip content={<ChartTooltip formatter={currencyTooltipFormatter} />} cursor={{ fill: 'rgba(168,85,247,0.06)' }} />
             <Bar dataKey="capitalPuesto" name={copy.capitalInvested} fill="rgba(139,136,166,0.35)" radius={[4, 4, 0, 0]} barSize={34} />
             <Bar dataKey="valorActual" name={copy.currentValue} radius={[4, 4, 0, 0]} barSize={20}>
@@ -331,12 +341,25 @@ export function CarteraPage({ filters, currency, positions }: Props) {
                     <td>{formatCurrency(row.position_value_base, currency, locale)}</td>
                     <td className={pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}>{formatCurrency(pnl, currency, locale)}</td>
                     <td className={pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}>
-                      {pnlPct === null ? '—' : `${pnlPct >= 0 ? '+' : ''}${pnlPct.toLocaleString(locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`}
+                      {pnlPct === null ? '—' : formatPercent(pnlPct, true, locale)}
                     </td>
-                    <td>{formatPercent(row.pct_of_nav, false, locale)}</td>
+                    <td>{formatPercent(row.weight, false, locale)}</td>
                   </tr>
                 );
               })}
+              {marginQ.isError ? (
+                <tr><td colSpan={6}><QueryError endpoint="/portfolio/margin" onRetry={() => marginQ.refetch()} /></td></tr>
+              ) : null}
+              {cashRows.map((row) => (
+                <tr key={`CASH-${row.currency}`} className="cash-row" title={copy.cashTitle}>
+                  <td><span className="position-symbol">CASH {row.currency}</span><small>{formatCurrency(row.ending_cash, row.currency, locale)}</small></td>
+                  <td>—</td>
+                  <td className={row.is_debt ? 'pnl-neg' : undefined}>{row.ending_cash_base != null ? formatCurrency(row.ending_cash_base, currency, locale) : '—'}</td>
+                  <td>—</td>
+                  <td>—</td>
+                  <td>{formatPercent(row.pct_of_nav, false, locale)}</td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>

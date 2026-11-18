@@ -5,9 +5,11 @@ from __future__ import annotations
 from fastapi import APIRouter, Query
 
 from ...analytics.options import (
+    OptionsContractSnapshot,
     options_assignment_rate,
     options_assignment_risk,
     options_concentration,
+    options_contract_snapshot,
     options_dte_buckets,
     options_eae_list,
     options_open_positions,
@@ -17,6 +19,8 @@ from ...analytics.options import (
     options_summary,
     options_trades_list,
 )
+from ...config import get_settings
+from ...integrations.optionslab import attach_management_signals
 from ..deps import PeriodDep, SessionDep
 
 router = APIRouter()
@@ -98,7 +102,21 @@ def open_positions(
     session: SessionDep,
     account_id: str | None = Query(None),
 ):
-    return options_open_positions(session, account_id=account_id)
+    payload = options_open_positions(session, account_id=account_id)
+    # Per row: OptionsLab management signal, or None (missing/invalid file never fails).
+    attach_management_signals(payload["rows"], get_settings().optionslab_signals_path)
+    return payload
+
+
+@router.get(
+    "/contract-snapshot",
+    response_model=OptionsContractSnapshot,
+    summary="Versioned, account-identifier-free open option legs (ibkr-dashboard.options.v1)",
+)
+def contract_snapshot(session: SessionDep):
+    """Expose EOD option legs for OptionsLab without account identifiers, NAV or P&L."""
+
+    return options_contract_snapshot(session)
 
 
 @router.get(

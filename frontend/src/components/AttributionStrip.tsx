@@ -1,4 +1,5 @@
 import type { OptionsPnlAttributionTotals } from '../lib/api';
+import { formatCurrency, formatPercent } from '../lib/format';
 import { useI18n } from '../lib/i18n';
 
 interface Props {
@@ -12,14 +13,17 @@ interface Props {
 
 const COPY = {
   es: {
-    edgeRatioTitle: 'short_premium / grand_total: qué fracción de tu P&L total viene de la edge real de opciones vs colateral direccional. La trampa del wheel-trader es contarse el equity como skill.',
-    edgeRatio: 'Options edge ratio',
+    edgeRatioTitle: 'short_premium / grand_total: qué fracción de tu P&L total viene de opciones vendidas (prima), frente a opciones compradas y acciones.',
+    edgeRatio: 'Peso de la prima vendida',
     of: 'de',
-    edgeRatioBreakdown: 'short_premium / grand_total · doctrina Sinclair',
-    shortPremiumTitle: 'OPT cerrados, fifo_pnl_realized en base. La edge real de la rueda.',
-    shortPremium: 'Short-premium edge',
-    shortPremiumBreakdown: 'OPT cerrados — la edge de opciones',
-    wheelStockTitle: 'STK cerrados sobre subyacentes con OPT — direccional, no vol.',
+    edgeRatioBreakdown: 'short_premium / grand_total',
+    shortPremiumTitle: 'OPT cerrados que se abrieron vendiendo (SELL abre, BUY cierra), fifo_pnl_realized en base.',
+    shortPremium: 'Prima vendida',
+    shortPremiumBreakdown: 'OPT vendidos y cerrados',
+    longPremiumTitle: 'OPT cerrados que se abrieron comprando (BUY abre, SELL cierra), fifo_pnl_realized en base. Es apuesta direccional, no venta de prima.',
+    longPremium: 'Opciones compradas',
+    longPremiumBreakdown: 'OPT comprados y cerrados — direccional',
+    wheelStockTitle: 'STK cerrados de acciones recibidas por asignación o ejercicio — direccional, no vol.',
     wheelDivs: '+ divs wheel',
     otherEquityTitle: 'Subyacentes sin opciones — fuera del scope de la estrategia.',
     otherEquity: 'Otros equity + divs',
@@ -30,14 +34,17 @@ const COPY = {
     capitalCostBreakdown: 'Broker interest neto · acciona si negativo grande',
   },
   en: {
-    edgeRatioTitle: 'short_premium / grand_total: how much of total P&L comes from the real options edge versus directional collateral. The wheel-trader trap is counting equity as skill.',
-    edgeRatio: 'Options edge ratio',
+    edgeRatioTitle: 'short_premium / grand_total: how much of total P&L comes from sold option premium, as opposed to long options and stock.',
+    edgeRatio: 'Sold-premium share',
     of: 'of',
-    edgeRatioBreakdown: 'short_premium / grand_total · Sinclair doctrine',
-    shortPremiumTitle: 'Closed OPT, fifo_pnl_realized in base currency. The real wheel edge.',
-    shortPremium: 'Short-premium edge',
-    shortPremiumBreakdown: 'Closed OPT — options edge',
-    wheelStockTitle: 'Closed STK on option underlyings: directional, not volatility.',
+    edgeRatioBreakdown: 'short_premium / grand_total',
+    shortPremiumTitle: 'Closed OPT opened by a SELL (SELL opens, BUY closes), fifo_pnl_realized in base currency.',
+    shortPremium: 'Sold premium',
+    shortPremiumBreakdown: 'Closed short options',
+    longPremiumTitle: 'Closed OPT opened by a BUY (BUY opens, SELL closes), fifo_pnl_realized in base currency. A directional bet, not premium selling.',
+    longPremium: 'Long options',
+    longPremiumBreakdown: 'Closed long options — directional',
+    wheelStockTitle: 'Closed STK from shares received through option assignment or exercise: directional, not volatility.',
     wheelDivs: '+ wheel divs',
     otherEquityTitle: 'Underlyings without options: outside the strategy scope.',
     otherEquity: 'Other equity + divs',
@@ -48,14 +55,17 @@ const COPY = {
     capitalCostBreakdown: 'Net broker interest · act if materially negative',
   },
   de: {
-    edgeRatioTitle: 'short_premium / grand_total: welcher Anteil des Gesamt-P&L aus der echten Options-Edge statt aus direktionalem Kollateral kommt. Die Wheel-Trader-Falle ist, Equity als Skill zu zaehlen.',
-    edgeRatio: 'Options-Edge-Ratio',
+    edgeRatioTitle: 'short_premium / grand_total: welcher Anteil des Gesamt-P&L aus verkaufter Optionspraemie stammt, im Gegensatz zu Long-Optionen und Aktien.',
+    edgeRatio: 'Anteil verkaufter Praemie',
     of: 'von',
-    edgeRatioBreakdown: 'short_premium / grand_total · Sinclair-Doktrin',
-    shortPremiumTitle: 'Geschlossene OPT, fifo_pnl_realized in Basiswaehrung. Die echte Wheel-Edge.',
-    shortPremium: 'Short-Premium-Edge',
-    shortPremiumBreakdown: 'Geschlossene OPT — Options-Edge',
-    wheelStockTitle: 'Geschlossene STK auf Options-Underlyings: direktional, nicht Volatilitaet.',
+    edgeRatioBreakdown: 'short_premium / grand_total',
+    shortPremiumTitle: 'Geschlossene OPT, per SELL eroeffnet (SELL eroeffnet, BUY schliesst), fifo_pnl_realized in Basiswaehrung.',
+    shortPremium: 'Verkaufte Praemie',
+    shortPremiumBreakdown: 'Geschlossene Short-Optionen',
+    longPremiumTitle: 'Geschlossene OPT, per BUY eroeffnet (BUY eroeffnet, SELL schliesst), fifo_pnl_realized in Basiswaehrung. Eine direktionale Wette, kein Praemienverkauf.',
+    longPremium: 'Long-Optionen',
+    longPremiumBreakdown: 'Geschlossene Long-Optionen — direktional',
+    wheelStockTitle: 'Geschlossene STK aus Aktien, die per Andienung oder Ausuebung erhalten wurden: direktional, nicht Volatilitaet.',
     wheelDivs: '+ Wheel-Divs',
     otherEquityTitle: 'Underlyings ohne Optionen: ausserhalb des Strategie-Scopes.',
     otherEquity: 'Other Equity + Divs',
@@ -69,11 +79,11 @@ const COPY = {
 
 function fmtCurrency(v: number | undefined | null, ccy: string, locale: string): string {
   if (v === undefined || v === null || Number.isNaN(v)) return '—';
-  return `${ccy} ${v.toLocaleString(locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return formatCurrency(v, ccy, locale);
 }
 
 /**
- * Sinclair "decompose before any skill claim" attribution strip.
+ * Options P&L attribution strip: sold premium, long options, wheel stock, other equity, cost of capital.
  *
  * Shared by Resumen (Dashboard.tsx) and Opciones (OptionsPanel.tsx) so the
  * two pages can't drift on labels or sign-convention.
@@ -94,7 +104,7 @@ export function AttributionStrip({ totals, currency, showEdgeRatio = false }: Pr
         >
           <span className="label">{copy.edgeRatio}</span>
           <div className="value-row">
-            <span className="value">{(edgeRatio * 100).toFixed(1)}%</span>
+            <span className="value">{formatPercent(edgeRatio * 100, false, locale)}</span>
             <span className="value-suffix">{copy.of} {fmtCurrency(t.grand_total_base, currency, locale)}</span>
           </div>
           <div className="breakdown">
@@ -112,6 +122,18 @@ export function AttributionStrip({ totals, currency, showEdgeRatio = false }: Pr
         </div>
         <div className="breakdown">
           <span className="sub">{copy.shortPremiumBreakdown}</span>
+        </div>
+      </div>
+
+      <div className="stat-card" title={copy.longPremiumTitle}>
+        <span className="label">{copy.longPremium}</span>
+        <div className="value-row">
+          <span className={`value ${(t.long_premium_base ?? 0) >= 0 ? 'pnl-pos' : 'pnl-neg'}`}>
+            {fmtCurrency(t.long_premium_base, currency, locale)}
+          </span>
+        </div>
+        <div className="breakdown">
+          <span className="sub">{copy.longPremiumBreakdown}</span>
         </div>
       </div>
 

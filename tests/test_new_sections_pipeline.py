@@ -1,6 +1,6 @@
 """End-to-end parser→loader coverage for the newer Flex sections.
 
-ChangeInNAV / MTDYTDPerformanceSummary / OptionEAE / Transfers previously had
+ChangeInNAV / OptionEAE / Transfers previously had
 no roundtrip coverage: ChangeInNavDaily — the source of /performance/risk
 (Sharpe/Sortino/MaxDD) and the attribution waterfall — was only ever seeded
 via ORM in test_vs_benchmark.py, so a parser regression (e.g. IBKR renaming
@@ -19,7 +19,6 @@ from ibkr_backend.db import session_scope
 from ibkr_backend.db.models import (
     ChangeInNavDaily,
     Instrument,
-    MtdYtdPerformance,
     OptionExerciseAssignment,
     Transfer,
 )
@@ -60,39 +59,6 @@ def test_change_in_nav_roundtrip_idempotent(sample_flex_xml):
         assert r.commissions == Decimal("-1.84")
         assert r.fx_translation == Decimal("-1.15")
         assert r.raw_xml  # raw row retained for re-derivation
-
-
-def test_mtd_ytd_performance_roundtrip_idempotent(sample_flex_xml):
-    _seed(sample_flex_xml)
-    _seed(sample_flex_xml)  # upsert_replace on (snapshot_date, account_id, conid)
-
-    with session_scope() as s:
-        rows = s.execute(select(MtdYtdPerformance)).scalars().all()
-        assert len(rows) == 2
-        by_conid = {r.conid: r for r in rows}
-        assert set(by_conid) == {265598, 100000}
-
-        aapl = by_conid[265598]
-        # Rows carry no date — it comes from the parent FlexStatement toDate.
-        assert aapl.snapshot_date == date(2025, 1, 31)
-        assert aapl.account_id == "U1234567"
-        assert aapl.symbol == "AAPL"
-        assert aapl.asset_class == "STK"
-        assert aapl.mtm_mtd == Decimal("100")
-        assert aapl.mtm_ytd == Decimal("100")
-        assert aapl.realized_mtd == Decimal("74")
-        assert aapl.realized_ytd == Decimal("74")
-        # ST/LT realized split surfaces under fifo_*/other_* (parser mapping).
-        assert aapl.fifo_mtd == Decimal("74")   # realSTMTD
-        assert aapl.other_mtd == Decimal("0")   # realLTMTD
-        # total = realized + mtm — transparent derivation in the parser.
-        assert aapl.total_mtd == Decimal("174")
-        assert aapl.total_ytd == Decimal("174")
-
-        vwce = by_conid[100000]
-        assert vwce.symbol == "VWCE"
-        assert vwce.total_mtd == Decimal("400")
-        assert vwce.total_ytd == Decimal("400")
 
 
 def test_option_eae_roundtrip_idempotent(sample_flex_xml):
@@ -188,8 +154,8 @@ def test_transfers_roundtrip_idempotent(sample_flex_xml):
 
 def test_new_sections_do_not_touch_external_cashflows(sample_flex_xml):
     """Transfers/ChangeInNAV must NOT feed nav_daily.external_cashflow — that
-    column derives exclusively from CashTransactions (Deposits/Withdrawals,
-    Internal Transfers). The fixture's only such flow is the 5000 EUR deposit.
+    column derives exclusively from CashTransactions (Deposits/Withdrawals).
+    The fixture's only such flow is the 5000 EUR deposit.
     """
     from ibkr_backend.db.models import NavDaily
 

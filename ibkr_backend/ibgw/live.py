@@ -2,7 +2,6 @@
 
 Use this for:
   * intraday quote enrichment (Flex is end-of-day only)
-  * watchlist enrichment (no Flex equivalent)
   * contract details (sector / industry / primary exchange)
   * intraday P&L (`reqPnL` / `reqPnLSingle`)
 
@@ -41,6 +40,19 @@ class Quote:
     currency: str | None
 
 
+# IB Gateway refuses a second connection that reuses a live `clientId`. The
+# scheduler's alert jobs and the API routes can overlap (the */3 margin poll, the
+# */15 price poll, the after-pull margin message, a GET /portfolio/margin/live),
+# so each caller names its purpose and gets its own id = base + offset (the
+# 2026-10 review found them all sharing the single base id 11).
+CLIENT_ID_OFFSETS: dict[str, int] = {
+    "margin_alerts": 1,
+    "margin_usage": 2,
+    "price_alerts": 3,
+    "portfolio": 4,
+}
+
+
 class LiveClient:
     """Synchronous facade over `ib_async.IB`.
 
@@ -55,6 +67,7 @@ class LiveClient:
         host: str | None = None,
         port: int | None = None,
         client_id: int | None = None,
+        purpose: str | None = None,
         readonly: bool | None = None,
         timeout: float = 8.0,
     ) -> None:
@@ -74,7 +87,9 @@ class LiveClient:
         self._IB = IB
         self._host = host or s.ibgw_host
         self._port = port or s.ibgw_port
-        self._client_id = client_id or s.ibgw_client_id
+        self._client_id = client_id or (
+            s.ibgw_client_id + CLIENT_ID_OFFSETS.get(purpose or "", 0)
+        )
         self._readonly = s.ibgw_readonly if readonly is None else readonly
         self._timeout = timeout
         self._ib: Any | None = None
@@ -105,6 +120,10 @@ class LiveClient:
             raise LiveUnavailable(
                 f"IB Gateway not connected after handshake at {self._host}:{self._port}"
             )
+        # ib_async's RequestTimeout defaults to 0 (== wait forever); a half-alive
+        # Gateway would then block a scheduler worker indefinitely. Bound every
+        # blocking request so it raises asyncio.TimeoutError instead of hanging.
+        ib.RequestTimeout = self._timeout
         self._ib = ib
 
     def disconnect(self) -> None:

@@ -9,7 +9,6 @@ import { useI18n } from '../lib/i18n';
 
 type TwrCurrency = 'CHF' | 'EUR' | 'USD';
 const TWR_CURRENCIES: TwrCurrency[] = ['CHF', 'EUR', 'USD'];
-const YEAR_RETURN_FILTER: PeriodFilters = { period: '1y' };
 
 interface Props {
   filters: PeriodFilters;
@@ -18,13 +17,17 @@ interface Props {
 
 const COPY = {
   es: {
-    intro: 'TWR (time-weighted) mide la habilidad de la cartera neutralizando el efecto de aportes. XIRR (money-weighted) responde a qué tasa anual está generando tu dinero y pondera por tamaño y timing de aportes.',
+    intro: 'TWR (time-weighted) encadena el TWR diario de IBKR (ChangeInNAV) y neutraliza los aportes. XIRR (money-weighted) responde a qué tasa anual genera tu dinero y pondera por tamaño y fecha de aportes. Nada se anualiza por debajo de un año.',
     currencyLabel: 'Divisa TWR:',
     unavailableTitle: 'Rentabilidad no disponible',
     unavailableBody: 'Necesita datos de NAV para calcular TWR.',
     noNavTitle: 'Sin datos de NAV en este periodo',
     noNavBody: 'No hay filas de NAV para el periodo seleccionado. Si la base de datos está recién creada, ejecuta el bootstrap o un pull del pipeline.',
     hiddenTitle: 'TWR y el chart Cartera vs S&P 500 están ocultos para este periodo.',
+    underOneYear: 'periodo < 1 año: no se anualiza',
+    fxFallback: 'Tipo de cambio de respaldo (Frankfurter): sin serie fx_rates de IBKR para esta divisa.',
+    fxMissing: 'Sin tipo de cambio para esta divisa: cifras convertidas no disponibles.',
+    spPeriodDelta: '{excess} exceso vs S&P 500',
     action: 'Acción:',
     actionBody: 'cambia el filtro de período arriba a YTD o 1Y para usar una zona con NAV diaria densa.',
     loading: 'cargando...',
@@ -38,42 +41,41 @@ const COPY = {
     navCoverage: 'Cobertura NAV {pct}% (necesita >= 50 %).',
     maxGap: 'Gap máximo entre snapshots: {days} días.',
     moneyWeightedFlows: 'money-weighted · {count} flujos',
-    interpolatedSnapshots: 'interpolado (snapshots)',
     loadingComparison: 'Cargando comparativa...',
-    portfolioPeriod: 'Cartera ({currency}) periodo',
-    spPeriod: 'S&P 500 ({currency}) periodo',
-    excessVsSp: 'Cartera vs S&P 500 (exceso)',
     beatsIndex: 'cartera bate al índice',
     belowIndex: 'cartera por debajo',
     riskNeeds: 'Necesita >= 10 días de TWR diario (sección Flex ChangeInNAV); tienes {days}.',
     riskMetrics: 'Métricas de riesgo',
-    riskSubtitle: '{days} días desde {from} hasta {to} · risk-free {rate}% · fuente: Flex ChangeInNAV.twr',
+    riskSubtitle: '{days} días desde {from} hasta {to} · {ccy} · risk-free {rate}% ({rfSource}) · fuente: Flex ChangeInNAV.twr',
+    riskShortWindow: 'Periodo < 1 año: retorno anualizado y Calmar no se muestran; Sharpe y Sortino usan la media aritmética diaria.',
     truncatedPrefix: 'Truncado:',
     riskTruncated: 'tu filtro pide {requestedFrom} -> {requestedTo}, pero el TWR diario solo existe desde {from}. Las métricas abajo cubren solo {days} días.',
-    dailyStd: 'std diaria x sqrt(252)',
+    dailyStd: 'std diaria x sqrt(obs/año)',
     sharpeDelta: '(ret - rf) / vol · > 1 bueno',
     sortinoDelta: 'penaliza solo downside',
     annualReturnDaily: 'Annual return (de daily)',
     alphaUnreliable: 'Alpha/Beta no fiable:',
-    alignedSubtitle: '{days} días alineados ({from} -> {to}) · S&P 500 en {currency}',
+    alignedSubtitle: '{days} días alineados ({from} -> {to}) · S&P 500 (índice de precio) en {currency}',
     alphaTruncated: 'tu filtro pide {requestedFrom} -> {requestedTo}, pero el comparativo solo usa {days} días.',
-    portfolioReturnPeriod: 'Retorno cartera (periodo)',
-    spReturn: 'Retorno S&P 500',
     marketSensitivity: 'sensibilidad al mercado',
     adjustedByBeta: 'ajustado por beta',
     trackingDays: '{days} días',
     trackingDelta: 'desviación de retornos vs índice',
     informationDelta: 'exceso de retorno / tracking error',
-    benchmarkAlignedNote: 'Cartera y S&P comparten exactamente las mismas fechas: ningún tramo dibuja una curva suave contra otra dentada. Donde el NAV es disperso (pre-2023) ambos son rectas entre snapshots; el segmento diario fiable empieza el 2023-11-28.',
+    benchmarkAlignedNote: 'Cartera y S&P 500 (índice de precio, sin dividendos) se comparan en las mismas fechas y se rebasan a 100 el día de NAV anterior al periodo. Los días sin cotización de uno de los dos se componen en la siguiente fecha común.',
   },
   en: {
-    intro: 'TWR (time-weighted) measures portfolio skill while neutralizing deposits and withdrawals. XIRR (money-weighted) answers what annual rate your money is generating and weights cash flows by size and timing.',
+    intro: 'TWR (time-weighted) chains IBKR\'s own daily ChangeInNAV TWR and neutralizes deposits and withdrawals. XIRR (money-weighted) answers what annual rate your money is generating and weights cash flows by size and date. Nothing is annualised below one year.',
     currencyLabel: 'TWR currency:',
     unavailableTitle: 'Performance unavailable',
     unavailableBody: 'NAV data is required to calculate TWR.',
     noNavTitle: 'No NAV data in this period',
     noNavBody: 'There are no NAV rows for the selected period. If the database is new, run bootstrap or a pipeline pull.',
     hiddenTitle: 'TWR and the Portfolio vs S&P 500 chart are hidden for this period.',
+    underOneYear: 'period < 1 year: not annualised',
+    fxFallback: 'Fallback exchange rate (Frankfurter): no IBKR fx_rates series for this currency.',
+    fxMissing: 'No exchange rate for this currency: converted figures are unavailable.',
+    spPeriodDelta: '{excess} excess vs S&P 500',
     action: 'Action:',
     actionBody: 'change the period filter above to YTD or 1Y to use a dense daily NAV zone.',
     loading: 'loading...',
@@ -87,42 +89,41 @@ const COPY = {
     navCoverage: 'NAV coverage {pct}% (needs >= 50%).',
     maxGap: 'Maximum gap between snapshots: {days} days.',
     moneyWeightedFlows: 'money-weighted · {count} flows',
-    interpolatedSnapshots: 'interpolated (snapshots)',
     loadingComparison: 'Loading comparison...',
-    portfolioPeriod: 'Portfolio ({currency}) period',
-    spPeriod: 'S&P 500 ({currency}) period',
-    excessVsSp: 'Portfolio vs S&P 500 (excess)',
     beatsIndex: 'portfolio beats the index',
     belowIndex: 'portfolio below the index',
     riskNeeds: 'Needs >= 10 days of daily TWR (Flex section ChangeInNAV); you have {days}.',
     riskMetrics: 'Risk metrics',
-    riskSubtitle: '{days} days from {from} to {to} · risk-free {rate}% · source: Flex ChangeInNAV.twr',
+    riskSubtitle: '{days} days from {from} to {to} · {ccy} · risk-free {rate}% ({rfSource}) · source: Flex ChangeInNAV.twr',
+    riskShortWindow: 'Period < 1 year: annualised return and Calmar are not shown; Sharpe and Sortino use the arithmetic daily mean.',
     truncatedPrefix: 'Truncated:',
     riskTruncated: 'your filter asks for {requestedFrom} -> {requestedTo}, but daily TWR only exists from {from}. The metrics below cover only {days} days.',
-    dailyStd: 'daily std x sqrt(252)',
+    dailyStd: 'daily std x sqrt(obs/year)',
     sharpeDelta: '(ret - rf) / vol · > 1 good',
     sortinoDelta: 'penalizes downside only',
     annualReturnDaily: 'Annual return (from daily)',
     alphaUnreliable: 'Alpha/Beta unreliable:',
-    alignedSubtitle: '{days} aligned days ({from} -> {to}) · S&P 500 in {currency}',
+    alignedSubtitle: '{days} aligned days ({from} -> {to}) · S&P 500 (price index) in {currency}',
     alphaTruncated: 'your filter asks for {requestedFrom} -> {requestedTo}, but the comparison only uses {days} days.',
-    portfolioReturnPeriod: 'Portfolio return (period)',
-    spReturn: 'S&P 500 return',
     marketSensitivity: 'market sensitivity',
     adjustedByBeta: 'adjusted for beta',
     trackingDays: '{days} days',
     trackingDelta: 'return deviation vs index',
     informationDelta: 'excess return / tracking error',
-    benchmarkAlignedNote: 'Portfolio and S&P use exactly the same dates: no segment draws a smooth curve against a jagged one. Where NAV is sparse (pre-2023), both are straight lines between snapshots; the reliable daily segment starts on 2023-11-28.',
+    benchmarkAlignedNote: 'Portfolio and S&P 500 (price index, no dividends) are compared on the same dates and rebased to 100 on the NAV day before the period. Days when one of them has no quote are compounded into the next common date.',
   },
   de: {
-    intro: 'TWR (time-weighted) misst Portfolio-Skill bereinigt um Ein- und Auszahlungen. XIRR (money-weighted) beantwortet, welche Jahresrendite dein Geld erzielt, gewichtet nach Groesse und Timing der Cashflows.',
+    intro: 'TWR (time-weighted) verkettet den taeglichen ChangeInNAV-TWR von IBKR und bereinigt Ein- und Auszahlungen. XIRR (money-weighted) beantwortet, welche Jahresrendite dein Geld erzielt, gewichtet nach Groesse und Datum der Cashflows. Unter einem Jahr wird nichts annualisiert.',
     currencyLabel: 'TWR-Waehrung:',
     unavailableTitle: 'Performance nicht verfuegbar',
     unavailableBody: 'NAV-Daten sind erforderlich, um TWR zu berechnen.',
     noNavTitle: 'Keine NAV-Daten in diesem Zeitraum',
     noNavBody: 'Fuer den ausgewaehlten Zeitraum gibt es keine NAV-Zeilen. Bei neuer Datenbank Bootstrap oder Pipeline-Pull ausfuehren.',
     hiddenTitle: 'TWR und Portfolio vs S&P 500 sind fuer diesen Zeitraum ausgeblendet.',
+    underOneYear: 'Zeitraum < 1 Jahr: nicht annualisiert',
+    fxFallback: 'Ersatz-Wechselkurs (Frankfurter): keine IBKR-fx_rates-Reihe fuer diese Waehrung.',
+    fxMissing: 'Kein Wechselkurs fuer diese Waehrung: umgerechnete Zahlen nicht verfuegbar.',
+    spPeriodDelta: '{excess} Excess vs S&P 500',
     action: 'Aktion:',
     actionBody: 'stelle den Zeitraumfilter oben auf YTD oder 1Y, um dichte taegliche NAV-Daten zu verwenden.',
     loading: 'laden...',
@@ -136,33 +137,28 @@ const COPY = {
     navCoverage: 'NAV-Abdeckung {pct}% (braucht >= 50%).',
     maxGap: 'Maximaler Gap zwischen Snapshots: {days} Tage.',
     moneyWeightedFlows: 'money-weighted · {count} Cashflows',
-    interpolatedSnapshots: 'interpoliert (Snapshots)',
     loadingComparison: 'Vergleich wird geladen...',
-    portfolioPeriod: 'Portfolio ({currency}) Zeitraum',
-    spPeriod: 'S&P 500 ({currency}) Zeitraum',
-    excessVsSp: 'Portfolio vs S&P 500 (Excess)',
     beatsIndex: 'Portfolio schlaegt den Index',
     belowIndex: 'Portfolio unter dem Index',
     riskNeeds: 'Braucht >= 10 Tage taeglichen TWR (Flex-Sektion ChangeInNAV); vorhanden: {days}.',
     riskMetrics: 'Risikometriken',
-    riskSubtitle: '{days} Tage von {from} bis {to} · risk-free {rate}% · Quelle: Flex ChangeInNAV.twr',
+    riskSubtitle: '{days} Tage von {from} bis {to} · {ccy} · risk-free {rate}% ({rfSource}) · Quelle: Flex ChangeInNAV.twr',
+    riskShortWindow: 'Zeitraum < 1 Jahr: annualisierte Rendite und Calmar werden nicht angezeigt; Sharpe und Sortino nutzen den arithmetischen Tagesmittelwert.',
     truncatedPrefix: 'Trunkiert:',
     riskTruncated: 'dein Filter verlangt {requestedFrom} -> {requestedTo}, aber taeglicher TWR existiert erst ab {from}. Die Metriken unten decken nur {days} Tage ab.',
-    dailyStd: 'taegliche Std x sqrt(252)',
+    dailyStd: 'taegliche Std x sqrt(Beob./Jahr)',
     sharpeDelta: '(ret - rf) / vol · > 1 gut',
     sortinoDelta: 'bestraft nur Downside',
     annualReturnDaily: 'Annual return (aus daily)',
     alphaUnreliable: 'Alpha/Beta unzuverlaessig:',
-    alignedSubtitle: '{days} ausgerichtete Tage ({from} -> {to}) · S&P 500 in {currency}',
+    alignedSubtitle: '{days} ausgerichtete Tage ({from} -> {to}) · S&P 500 (Preisindex) in {currency}',
     alphaTruncated: 'dein Filter verlangt {requestedFrom} -> {requestedTo}, aber der Vergleich nutzt nur {days} Tage.',
-    portfolioReturnPeriod: 'Portfolio-Return (Zeitraum)',
-    spReturn: 'S&P 500 Return',
     marketSensitivity: 'Marktsensitivitaet',
     adjustedByBeta: 'beta-adjustiert',
     trackingDays: '{days} Tage',
     trackingDelta: 'Return-Abweichung vs Index',
     informationDelta: 'Excess Return / Tracking Error',
-    benchmarkAlignedNote: 'Portfolio und S&P verwenden exakt dieselben Daten: kein Abschnitt zeichnet eine glatte Kurve gegen eine gezackte. Wo der NAV duenn ist (vor 2023), sind beide Linien zwischen Snapshots gerade; das verlaessliche taegliche Segment beginnt am 2023-11-28.',
+    benchmarkAlignedNote: 'Portfolio und S&P 500 (Preisindex, ohne Dividenden) werden an denselben Daten verglichen und am NAV-Tag vor dem Zeitraum auf 100 normiert. Tage ohne Kurs eines der beiden werden ins naechste gemeinsame Datum aufgezinst.',
   },
 } as const;
 
@@ -171,25 +167,11 @@ export function RentabilidadPage({ filters, currency }: Props) {
   const copy = COPY[language];
   const [twrCurrency, setTwrCurrency] = useState<TwrCurrency>('CHF');
 
+  // One summary call: every figure on the page (TWR, S&P, excess, alpha) derives
+  // from the same ChangeInNAV series and the same dates.
   const twr = useQuery({
-    queryKey: ['performance.twr', filters, twrCurrency],
-    queryFn: () => api.performanceTwr(filters, twrCurrency === 'CHF' ? undefined : twrCurrency),
-  });
-  const yearTwrChf = useQuery({
-    queryKey: ['performance.twr', YEAR_RETURN_FILTER, 'CHF'],
-    queryFn: () => api.performanceTwr(YEAR_RETURN_FILTER),
-  });
-  const yearTwrEur = useQuery({
-    queryKey: ['performance.twr', YEAR_RETURN_FILTER, 'EUR'],
-    queryFn: () => api.performanceTwr(YEAR_RETURN_FILTER, 'EUR'),
-  });
-  const yearTwrUsd = useQuery({
-    queryKey: ['performance.twr', YEAR_RETURN_FILTER, 'USD'],
-    queryFn: () => api.performanceTwr(YEAR_RETURN_FILTER, 'USD'),
-  });
-  const benchmarkSp500 = useQuery({
-    queryKey: ['performance.benchmark.sp500', filters, twrCurrency],
-    queryFn: () => api.benchmark(filters, twrCurrency),
+    queryKey: ['performance.twr', filters, twrCurrency, 'summary'],
+    queryFn: () => api.performanceTwr(filters, twrCurrency === 'CHF' ? undefined : twrCurrency, true),
   });
   const riskQ = useQuery({
     queryKey: ['performance.risk', filters],
@@ -208,33 +190,14 @@ export function RentabilidadPage({ filters, currency }: Props) {
     queryFn: () => api.performanceXirr(filters),
   });
 
-  const twrPct = twr.data?.twr_pct as number | undefined;
+  const twrPct = (twr.data?.twr_pct ?? undefined) as number | undefined;
   const annualisedPct = twr.data?.annualised_pct as number | undefined;
-  const localizeBenchmarkNote = (note: string | undefined | null): string => {
-    if (!note) return '';
-    if (note.includes('Cartera y S&P comparten exactamente las mismas fechas')) {
-      return copy.benchmarkAlignedNote;
-    }
-    return note;
-  };
 
   return (
     <>
       <div className="info-box">
         {copy.intro}
       </div>
-      <div className="kpi-grid">
-        <KPICard label="TWR 1Y (CHF)" value={formatPercent(yearTwrChf.data?.twr_pct, true, locale)}
-          delta={formatPercent(yearTwrChf.data?.annualised_pct, true, locale)}
-          deltaKind={(yearTwrChf.data?.twr_pct ?? 0) >= 0 ? 'pos' : 'neg'} loading={yearTwrChf.isLoading} />
-        <KPICard label="TWR 1Y (EUR)" value={formatPercent(yearTwrEur.data?.twr_pct, true, locale)}
-          delta={formatPercent(yearTwrEur.data?.annualised_pct, true, locale)}
-          deltaKind={(yearTwrEur.data?.twr_pct ?? 0) >= 0 ? 'pos' : 'neg'} loading={yearTwrEur.isLoading} />
-        <KPICard label="TWR 1Y (USD)" value={formatPercent(yearTwrUsd.data?.twr_pct, true, locale)}
-          delta={formatPercent(yearTwrUsd.data?.annualised_pct, true, locale)}
-          deltaKind={(yearTwrUsd.data?.twr_pct ?? 0) >= 0 ? 'pos' : 'neg'} loading={yearTwrUsd.isLoading} />
-      </div>
-
       <div className="twr-switcher">
         <span className="twr-switcher-label">{copy.currencyLabel}</span>
         {TWR_CURRENCIES.map((c) => (
@@ -244,14 +207,13 @@ export function RentabilidadPage({ filters, currency }: Props) {
 
       {twr.isError ? (
         <MissingData title={copy.unavailableTitle}>{copy.unavailableBody}</MissingData>
-      ) : twr.data && (twr.data.series ?? []).length === 0 && twr.data.quality == null ? (
+      ) : twr.data && (twr.data.n_days ?? 0) === 0 && twr.data.quality == null ? (
         // Backend OK pero sin filas NavDaily en el rango (p. ej. primer arranque con DB vacía).
         <MissingData title={copy.noNavTitle}>
           {copy.noNavBody}
         </MissingData>
       ) : (() => {
         const quality = twr.data?.quality as { is_reliable?: boolean; reason?: string; coverage_ratio?: number; max_gap_days?: number } | undefined;
-        const warmupSkipped = (twr.data as { warmup_skipped?: number } | undefined)?.warmup_skipped ?? 0;
         const reliable = quality?.is_reliable !== false;
         return (
           <>
@@ -261,9 +223,14 @@ export function RentabilidadPage({ filters, currency }: Props) {
                 {quality?.reason ?? ''}
                 {quality?.coverage_ratio !== undefined && ` ${copy.navCoverage.replace('{pct}', (quality.coverage_ratio * 100).toFixed(0))}`}
                 {quality?.max_gap_days !== undefined && quality.max_gap_days > 10 && ` ${copy.maxGap.replace('{days}', String(quality.max_gap_days))}`}
-                {warmupSkipped > 0 && ` (${warmupSkipped} filas warm-up descartadas por NAV inicial muy bajo.)`}
                 <br />
                 <strong>{copy.action}</strong> {copy.actionBody}
+              </div>
+            )}
+
+            {twr.data?.fx_degraded && (
+              <div className="info-box" style={{ background: 'rgba(245,158,11,0.08)', borderColor: 'var(--border-warn)' }}>
+                {twr.data.twr_pct == null && twr.data.fx_source ? copy.fxMissing : copy.fxFallback}
               </div>
             )}
 
@@ -272,7 +239,7 @@ export function RentabilidadPage({ filters, currency }: Props) {
                 delta={twr.isFetching ? copy.loading : (twrPct == null ? copy.hidden : copy.isolatesFlows)}
                 deltaKind={twrPct != null ? (twrPct >= 0 ? 'pos' : 'neg') : 'neutral'} loading={twr.isLoading} />
               <KPICard label={`TWR Annualized (${twrCurrency})`} value={formatPercent(annualisedPct, true, locale)}
-                delta={annualisedPct == null ? copy.hidden : undefined}
+                delta={annualisedPct == null ? (twrPct == null ? copy.hidden : copy.underOneYear) : undefined}
                 deltaKind={annualisedPct != null ? (annualisedPct >= 0 ? 'pos' : 'neg') : 'neutral'} loading={twr.isLoading} />
               {(() => {
                 const xirrPct = xirrQ.data?.xirr_pct;
@@ -281,27 +248,24 @@ export function RentabilidadPage({ filters, currency }: Props) {
                 return (
                   <KPICard
                     label={`XIRR (${currency})`}
-                    value={xirrPct != null ? `${xirrPct >= 0 ? '+' : ''}${xirrPct.toFixed(2)}%` : '—'}
+                    value={xirrPct != null ? formatPercent(xirrPct, true, locale) : '—'}
                     delta={xirrPct != null
                       ? `${copy.moneyWeightedFlows.replace('{count}', String(flowCount ?? 0))}${xirrNote ? ' · ⚠ ' + xirrNote : ''}`
-                      : (xirrQ.data?.error ?? copy.insufficient)}
+                      : (xirrQ.data?.error ?? (xirrQ.data?.annualised === false ? copy.underOneYear : copy.insufficient))}
                     deltaKind={xirrPct != null ? (xirrPct >= 0 ? 'pos' : 'neg') : 'neutral'}
                     loading={xirrQ.isLoading}
                   />
                 );
               })()}
               {(() => {
-                const last = benchmarkSp500.data?.rows?.[benchmarkSp500.data.rows.length - 1];
-                const delta = (last?.return_pct != null && twrPct != null)
-                  ? `${formatPercent(twrPct - last.return_pct, true, locale)} vs SP500`
-                  : undefined;
+                const lc = vsb.data?.is_reliable ? vsb.data.level_comparison : undefined;
                 return (
                   <KPICard
-                    label={`SP500 (${twrCurrency})`}
-                    value={formatPercent(last?.return_pct, true, locale)}
-                    delta={delta}
-                    deltaKind={last?.return_pct !== undefined ? (last.return_pct >= 0 ? 'pos' : 'neg') : 'neutral'}
-                    loading={benchmarkSp500.isLoading}
+                    label={`S&P 500 (${twrCurrency})`}
+                    value={formatPercent(lc?.benchmark_return_pct, true, locale)}
+                    delta={lc ? copy.spPeriodDelta.replace('{excess}', formatPercent(lc.excess_return_pct, true, locale)) : undefined}
+                    deltaKind={lc ? (lc.excess_return_pct >= 0 ? 'pos' : 'neg') : 'neutral'}
+                    loading={vsb.isLoading}
                   />
                 );
               })()}
@@ -337,12 +301,7 @@ export function RentabilidadPage({ filters, currency }: Props) {
                   </div>
                   {res?.note && (
                     <div className="info-box" style={{ marginTop: 8, marginBottom: 8, fontSize: 12 }}>
-                      {localizeBenchmarkNote(res.note)}
-                      {res.is_sparse && (
-                        <span style={{ marginLeft: 8, padding: '1px 6px', background: 'rgba(245,158,11,0.15)', borderRadius: 4, color: '#f59e0b', fontSize: 11, fontWeight: 600 }}>
-                          {copy.interpolatedSnapshots}
-                        </span>
-                      )}
+                      {copy.benchmarkAlignedNote}
                     </div>
                   )}
                   <EquityChart
@@ -353,30 +312,6 @@ export function RentabilidadPage({ filters, currency }: Props) {
                     height={340}
                   />
                   {vsb.isLoading && (<div className="info-box" style={{ marginTop: 8 }}>{copy.loadingComparison}</div>)}
-                </div>
-              );
-            })()}
-
-            {vsb.data?.is_reliable && vsb.data.level_comparison && (() => {
-              const lc = vsb.data.level_comparison;
-              return (
-                <div className="kpi-grid" style={{ marginTop: 18 }}>
-                  <KPICard
-                    label={copy.portfolioPeriod.replace('{currency}', twrCurrency)}
-                    value={`${lc.portfolio_return_pct >= 0 ? '+' : ''}${lc.portfolio_return_pct.toFixed(2)}%`}
-                    deltaKind={lc.portfolio_return_pct >= 0 ? 'pos' : 'neg'}
-                  />
-                  <KPICard
-                    label={copy.spPeriod.replace('{currency}', twrCurrency)}
-                    value={`${lc.benchmark_return_pct >= 0 ? '+' : ''}${lc.benchmark_return_pct.toFixed(2)}%`}
-                    deltaKind={lc.benchmark_return_pct >= 0 ? 'pos' : 'neg'}
-                  />
-                  <KPICard
-                    label={copy.excessVsSp}
-                    value={`${lc.excess_return_pct >= 0 ? '+' : ''}${lc.excess_return_pct.toFixed(2)}%`}
-                    delta={lc.excess_return_pct >= 0 ? copy.beatsIndex : copy.belowIndex}
-                    deltaKind={lc.excess_return_pct >= 0 ? 'pos' : 'neg'}
-                  />
                 </div>
               );
             })()}
@@ -402,9 +337,14 @@ export function RentabilidadPage({ filters, currency }: Props) {
                         .replace('{days}', String(rm.n_days))
                         .replace('{from}', String(rm.from_date ?? ''))
                         .replace('{to}', String(rm.to_date ?? ''))
-                        .replace('{rate}', String(rm.risk_free_rate_pct))}
+                        .replace('{ccy}', String(rm.currency ?? 'CHF'))
+                        .replace('{rate}', String(rm.risk_free_rate_pct))
+                        .replace('{rfSource}', String(rm.risk_free_source ?? ''))}
                     </small>
                   </div>
+                  {rm.annualised === false && (
+                    <div className="info-box" style={{ marginTop: 8 }}>{copy.riskShortWindow}</div>
+                  )}
                   {rm.is_truncated && (
                     <div className="info-box" style={{ background: 'rgba(245,158,11,0.10)', borderColor: 'var(--border-warn)', marginTop: 8 }}>
                       <strong>⚠ {copy.truncatedPrefix}</strong>{' '}
@@ -418,7 +358,7 @@ export function RentabilidadPage({ filters, currency }: Props) {
                   )}
                   <div className="kpi-grid">
                     <KPICard label="Volatility (annualised)"
-                      value={rm.annualised_volatility_pct !== undefined ? `${rm.annualised_volatility_pct.toFixed(2)}%` : '—'}
+                      value={rm.annualised_volatility_pct !== undefined ? formatPercent(rm.annualised_volatility_pct, false, locale) : '—'}
                       delta={copy.dailyStd} deltaKind="neutral" loading={riskQ.isLoading} />
                     <KPICard label="Sharpe Ratio"
                       value={rm.sharpe_ratio !== undefined && rm.sharpe_ratio !== null ? rm.sharpe_ratio.toFixed(2) : '—'}
@@ -429,7 +369,7 @@ export function RentabilidadPage({ filters, currency }: Props) {
                       delta={copy.sortinoDelta}
                       deltaKind={(rm.sortino_ratio ?? 0) >= 1 ? 'pos' : (rm.sortino_ratio ?? 0) >= 0 ? 'neutral' : 'neg'} loading={riskQ.isLoading} />
                     <KPICard label="Max Drawdown"
-                      value={rm.max_drawdown_pct !== undefined ? `${rm.max_drawdown_pct.toFixed(2)}%` : '—'}
+                      value={rm.max_drawdown_pct !== undefined ? formatPercent(rm.max_drawdown_pct, false, locale) : '—'}
                       delta={rm.max_drawdown_peak_date && rm.max_drawdown_trough_date
                         ? `${rm.max_drawdown_peak_date} → ${rm.max_drawdown_trough_date}`
                         : undefined}
@@ -439,7 +379,7 @@ export function RentabilidadPage({ filters, currency }: Props) {
                       delta="annual return / |max DD|"
                       deltaKind={(rm.calmar_ratio ?? 0) >= 1 ? 'pos' : 'neutral'} loading={riskQ.isLoading} />
                     <KPICard label={copy.annualReturnDaily}
-                      value={rm.annualised_return_pct !== undefined ? `${rm.annualised_return_pct.toFixed(2)}%` : '—'}
+                      value={rm.annualised_return_pct != null ? formatPercent(rm.annualised_return_pct, false, locale) : '—'}
                       delta={`${rm.positive_days}↑ ${rm.negative_days}↓`}
                       deltaKind={(rm.annualised_return_pct ?? 0) >= 0 ? 'pos' : 'neg'} loading={riskQ.isLoading} />
                   </div>
@@ -472,22 +412,12 @@ export function RentabilidadPage({ filters, currency }: Props) {
                           </div>
                         )}
                         <div className="kpi-grid">
-                          <KPICard label={copy.portfolioReturnPeriod}
-                            value={a.portfolio_total_return_pct !== undefined ? `${a.portfolio_total_return_pct.toFixed(2)}%` : '—'}
-                            deltaKind={(a.portfolio_total_return_pct ?? 0) >= 0 ? 'pos' : 'neg'} />
-                          <KPICard label={copy.spReturn}
-                            value={a.benchmark_total_return_pct !== undefined ? `${a.benchmark_total_return_pct.toFixed(2)}%` : '—'}
-                            deltaKind={(a.benchmark_total_return_pct ?? 0) >= 0 ? 'pos' : 'neg'} />
-                          <KPICard label="Alpha simple (diff)"
-                            value={a.simple_alpha_pct !== undefined ? `${a.simple_alpha_pct >= 0 ? '+' : ''}${a.simple_alpha_pct.toFixed(2)}%` : '—'}
-                            delta={a.simple_alpha_pct !== undefined && a.simple_alpha_pct >= 0 ? copy.beatsIndex : copy.belowIndex}
-                            deltaKind={(a.simple_alpha_pct ?? 0) >= 0 ? 'pos' : 'neg'} />
                           <KPICard label="Beta"
                             value={a.beta !== undefined && a.beta !== null ? a.beta.toFixed(2) : '—'}
                             delta={copy.marketSensitivity}
                             deltaKind={a.beta !== undefined && a.beta !== null && a.beta > 1.2 ? 'warn' : 'neutral'} />
                           <KPICard label="Alpha Jensen"
-                            value={a.jensen_alpha_pct !== undefined && a.jensen_alpha_pct !== null ? `${a.jensen_alpha_pct >= 0 ? '+' : ''}${a.jensen_alpha_pct.toFixed(2)}%` : '—'}
+                            value={a.jensen_alpha_pct !== undefined && a.jensen_alpha_pct !== null ? formatPercent(a.jensen_alpha_pct, true, locale) : '—'}
                             delta={copy.adjustedByBeta}
                             deltaKind={(a.jensen_alpha_pct ?? 0) >= 0 ? 'pos' : 'neg'} />
                           {vsb.data?.risk_comparison && (() => {
@@ -496,7 +426,7 @@ export function RentabilidadPage({ filters, currency }: Props) {
                               <>
                                 <KPICard
                                   label="Tracking Error"
-                                  value={rc.tracking_error_pct != null ? `${rc.tracking_error_pct.toFixed(2)}%` : '—'}
+                                  value={rc.tracking_error_pct != null ? formatPercent(rc.tracking_error_pct, false, locale) : '—'}
                                   delta={rc.te_days != null ? copy.trackingDays.replace('{days}', String(rc.te_days)) : copy.trackingDelta}
                                   deltaKind="neutral"
                                 />

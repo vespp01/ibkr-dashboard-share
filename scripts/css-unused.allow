@@ -1,0 +1,2 @@
+# Classes the css-unused check cannot see in TS/TSX (third-party markup).
+recharts-bar-rectangle

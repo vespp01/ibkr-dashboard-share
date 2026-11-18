@@ -58,7 +58,7 @@ Operaciones, Dividendos, Rentabilidad, Comisiones).
    | Field | Value |
    |---|---|
    | Query Name | `dashboard_full_daily` |
-   | Period | `Year to Date` (recommended; the CLI override is intentionally empty so the saved-period applies) |
+   | Period | `Last 30 Calendar Days` (recommended — `Year to Date` was delivered truncated by IBKR and froze all Activity tables 2026-08-17→09-12; the CLI/scheduler never override the period) |
    | Date Format | `yyyyMMdd` |
    | Time Format | `HHmmss` |
    | Date/Time Separator | `;` (semicolon) |
@@ -77,7 +77,6 @@ of the following** to render every dashboard tab without holes:
 - [x] **Account Information**
 - [x] **Net Asset Value (NAV) in Base** ← needed for TWR / risk metrics
 - [x] **Change in NAV in Base** ← waterfall attribution (MTM / realized / dividends / fees)
-- [x] **MTD/YTD Performance Summary** ← per-symbol month/year-to-date attribution
 - [x] **Cash Report**
 - [x] **Open Positions** (Summary level)
 - [x] **Trades** (Execution level)
@@ -99,11 +98,11 @@ silent-skip rows that are very hard to debug. If in doubt, check every box.
 
 ### 1.3. Save and grab the Query ID
 
-After saving you'll see the query in the list with an 8-digit **Query ID**.
+After saving you'll see the query in the list with a 7–8-digit **Query ID**.
 Add to `.env`:
 
 ```ini
-IB_FLEX_QUERY_ID=<the-8-digit-id>
+IB_FLEX_QUERY_ID=<the-7-8-digit-id>
 ```
 
 ### 1.4. Test
@@ -113,13 +112,13 @@ docker exec ibkr-backend python -m ibkr_backend.cli pull
 ```
 
 The CLI prints a per-section row count. Expect non-zero `nav_daily`,
-`change_in_nav`, `trades`, `cash_transactions`, `mtd_ytd_performance`,
+`change_in_nav`, `trades`, `cash_transactions`,
 `fifo_performance`, `mtm_performance`. The `accounts` and `instruments`
 counts will be 1 / N depending on your account.
 
 The APScheduler daily cron (`pipeline_cron = "30 6 * * *"` by default,
-weekdays only) runs this same command — first weekday after wiring is
-the production smoke test.
+every day, 06:30 container TZ) runs this same command — the next morning
+is the production smoke test.
 
 ---
 
@@ -180,15 +179,18 @@ Fields **not available** in TC (silently ignored if absent):
 After saving, copy the Query ID into `.env`:
 
 ```ini
-IB_FLEX_QUERY_ID_TC=<the-8-digit-id>
+IB_FLEX_QUERY_ID_TC=<the-7-8-digit-id>
 ```
 
 Recreate the backend container so the env var is picked up:
 
 ```bash
 docker compose up -d --force-recreate backend
-docker exec ibkr-backend env | grep IB_FLEX_QUERY_ID_TC
 ```
+
+Do not print the container env to check it (it also holds the tokens). The test in
+§2.4 confirms the ID: `pull-tc` succeeds only with a valid TC query ID. After the next
+scheduled TC pull (:15), `docker compose logs backend | grep "SendRequest q="` shows it.
 
 ### 2.4. Test
 
@@ -205,8 +207,9 @@ docker exec ibkr-backend python -m ibkr_backend.cli pull-tc
 ```
 
 If your account had executions in the window you'll see `trade_executions`
-rows inserted. The APScheduler TC cron (`tc_cron = "15 * * * 1-5"` —
-weekday hourly at :15) re-pulls automatically.
+rows inserted. The APScheduler TC cron (`tc_cron = "15 * * * *"` —
+hourly at :15, every day; keeps the watchdog pull-attempt stamp warm)
+re-pulls automatically.
 
 ---
 
@@ -221,7 +224,9 @@ returning HTTP 604:
 2. Replace **both** `IB_FLEX_TOKEN` and `IB_FLEX_TOKEN_EXPIRY` (the new date) in
    `.env` — if you forget the expiry, the Telegram pre-expiry warning fires on
    the wrong date.
-3. `docker compose up -d --force-recreate backend`.
+3. `docker compose up -d --force-recreate backend`, then check
+   `curl -sf http://localhost:5173/api/health` (nginx re-resolves the backend
+   itself; no frontend restart needed).
 
 The saved queries themselves do **not** expire — only the token does. With
 Telegram configured, the daily job warns you `TOKEN_EXPIRY_WARN_DAYS` (default
@@ -229,14 +234,18 @@ Telegram configured, the daily job warns you `TOKEN_EXPIRY_WARN_DAYS` (default
 
 ---
 
-## 4. Optional: `LastBusinessDay` vs `YTD` period
+## 4. Period: `Last 30 Calendar Days` vs `YTD` vs `LastBusinessDay`
 
 Activity Flex queries accept a saved-period setting. There's a meaningful
 choice:
 
-- **`Year to Date`** (recommended): each daily run re-fetches the full
-  current year. Upserts are idempotent so this is free; the upside is that
-  if the cron misses a day the next run automatically catches up.
+- **`Last 30 Calendar Days`** (recommended): each daily run re-fetches the
+  last 30 days. Upserts are idempotent so this is free, and any gap shorter
+  than 30 days (missed crons, a dead token) is caught up by the next run.
+- **`Year to Date`**: IBKR can deliver it truncated. From 2026-08-17 to
+  09-12 every daily pull returned `success` with `rows_inserted=0` while all
+  Activity tables stayed frozen. `data_freshness` in `/pipeline/status` now
+  alerts when data stops advancing, but the fix is still this setting.
 - **`LastBusinessDay`**: faster pulls, smaller XML; downside is that any
   missed cron leaves a gap that requires manual `--from` / `--to` backfill.
 
@@ -251,7 +260,9 @@ setting is the one that matters in practice.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `FlexError: HTTP 604` from `SendRequest` | Token expired or wrong | Regenerate token (§3) |
+| `FlexError: HTTP 604` from `SendRequest` | `--period` (or `period` on `POST /pipeline/run`) passed to a fixed-period query | Drop `--period`; the saved period applies |
 | `FlexError: HTTP 604` from `GetStatement` | Query ID deactivated | Re-save the query in the portal (don't change ID, just hit save) |
+| Pull `success` but `data_freshness.data_is_stale` / `rows_inserted=0` for days | Query Period no longer covers recent days | Set Period to `Last 30 Calendar Days` (§4) |
 | Empty `nav_daily` after pull | NAV section unchecked in Activity Flex | Re-enable in §1.2 |
 | Empty `trade_executions` after `pull-tc` | TC query not run yet for the date / weekend | Try `--from`/`--to` on a known active trading day |
 | `dashboard_has_data() == False` after first pull | Either the token isn't set or the saved query has no enabled sections | Inspect `flex_runs` table — last entry's `error` column shows the underlying cause |

@@ -1,6 +1,9 @@
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../lib/api';
+import { NotificationsSettings } from '../components/NotificationsSettings';
+import { QueryError } from '../components/QueryError';
 import { DASHBOARD_CARDS, useDashboardLayout } from '../lib/dashboardLayout';
+import { parseBackendTimestamp } from '../lib/format';
 import { LANGUAGE_OPTIONS, useI18n } from '../lib/i18n';
 
 const FLEX_GUIDE_URL = 'https://www.interactivebrokers.com/campus/ibkr-api-page/flex-web-service/';
@@ -19,16 +22,23 @@ export function SettingsPage() {
 
   const latestRun = pipeline.data?.latest_run;
   const latestRunLabel = latestRun?.fetched_at
-    ? new Date(latestRun.fetched_at).toLocaleString(locale)
+    ? (parseBackendTimestamp(latestRun.fetched_at)?.toLocaleString(locale) ?? '--')
     : '--';
   const latestDataLabel = coverage.data?.last_date ?? '--';
   const rowsImported = latestRun?.rows_inserted ?? 0;
   const rowsSkipped = latestRun?.rows_skipped_dup ?? 0;
-  const isStale = pipeline.data?.staleness?.is_stale ?? false;
+  // Data age in business days (backend rule), falling back to pull liveness.
+  const isStale = pipeline.data?.data_freshness?.data_is_stale ?? pipeline.data?.staleness?.is_stale ?? false;
   const activityConfigured = pipeline.data?.activity_configured ?? pipeline.data?.configured ?? false;
 
   return (
     <div className="settings-grid">
+      {pipeline.isError ? (
+        <div className="settings-wide"><QueryError endpoint="/pipeline/status" onRetry={() => pipeline.refetch()} /></div>
+      ) : null}
+      {coverage.isError ? (
+        <div className="settings-wide"><QueryError endpoint="/data/coverage" onRetry={() => coverage.refetch()} /></div>
+      ) : null}
       <section className="chart-panel settings-panel">
         <div className="panel-header">
           <div>
@@ -79,6 +89,8 @@ export function SettingsPage() {
           <li>{t('settings.privacyItems.sample')}</li>
         </ul>
       </section>
+
+      <NotificationsSettings />
 
       <section className="chart-panel settings-panel settings-wide">
         <div className="panel-header">

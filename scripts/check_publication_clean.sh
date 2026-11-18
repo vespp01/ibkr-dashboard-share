@@ -44,7 +44,6 @@ ENABLE_LIVE_OVERLAY=false
 DATABASE_URL=sqlite:///./ibkr_backend.db
 PIPELINE_CRON=30 6 * * *
 LOG_LEVEL=INFO
-WATCHLIST_FILE=./watchlists.yaml
 API_HOST=127.0.0.1
 API_PORT=8000
 BACKEND_HOST_PORT=$backend_port

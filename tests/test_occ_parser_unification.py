@@ -1,6 +1,6 @@
 """Pin the behavior of the unified OCC parser at its metrics.py call-sites.
 
-Overnight 2026-06-10, item A4 (finding #36): `metrics._parse_option_symbol`
+`metrics._parse_option_symbol`
 duplicated `options_parsing.parse_occ_symbol` with a *different* regex.
 metrics now delegates to `options_parsing.enrich_option`. These tests fix the
 edge cases where the two implementations diverged, keeping the behavior of
